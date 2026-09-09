@@ -8,6 +8,7 @@ class NcodeInterpreter {
     private val reserved = trueWords + falseWords + setOf(
         "пробел", "и", "или",
         "равно", "равняется", "неравно", "неравняется", "больше", "меньше",
+        "плюс", "минус", "умножить", "разделить", "поделить", "остаток",
         "если", "эсли", "то", "тогда", "иначеесли", "иначе", "конец",
         "повтори", "повторить", "повторять"
     )
@@ -36,6 +37,8 @@ class NcodeInterpreter {
                     i = runIf(lines, i, base)
                 } else if (startsKw(line, "повтори", "повторить", "повторять")) {
                     i = runRepeat(lines, i, base)
+                } else if (startsKakTolko(line)) {
+                    i = runKakTolko(lines, i, base)
                 } else {
                     if (startsKw(line, "конец"))
                         throw NcodeError("`конец` без `если`/`повтори`")
@@ -45,12 +48,19 @@ class NcodeInterpreter {
             } catch (e: NcodeError) {
                 System.err.println("Ошибка в строке ${base + i}: ${e.message}  >> $rawLine")
                 hadError = true
-                i = if (startsKw(line, "если", "эсли", "повтори", "повторить", "повторять")) {
+                i = if (startsKw(line, "если", "эсли", "повтори", "повторить", "повторять") || startsKakTolko(line)) {
                     try { collectIf(lines, i).second } catch (e2: NcodeError) { lines.size }
                 } else i + 1
             }
         }
         return if (hadError || execFailed) 1 else 0
+    }
+
+    private fun startsKakTolko(line: String): Boolean {
+        val parts = line.trim().split(Regex("\\s+"), limit = 3)
+        if (parts.size < 2) return false
+        return parts[0].lowercase(java.util.Locale.ROOT) == "как" &&
+            parts[1].lowercase(java.util.Locale.ROOT) == "только"
     }
 
     private fun startsKw(line: String, vararg words: String): Boolean {
@@ -61,7 +71,7 @@ class NcodeInterpreter {
         return t.substring(0, j).lowercase(java.util.Locale.ROOT) in words
     }
 
-    private enum class Kw { ЕСЛИ, ТО, ИНАЧЕЕСЛИ, ИНАЧЕ, КОНЕЦ, ПОВТОРИ }
+    private enum class Kw { ЕСЛИ, ТО, ИНАЧЕЕСЛИ, ИНАЧЕ, КОНЕЦ, ПОВТОРИ, КАКТОЛЬКО }
     private data class KwHit(val kw: Kw, val start: Int, val end: Int)
 
     private fun findKw(text: String): List<KwHit> {
@@ -75,7 +85,19 @@ class NcodeInterpreter {
             if (c.isLetter()) {
                 var j = i + 1
                 while (j < text.length && (text[j].isLetterOrDigit() || text[j] == '_')) j++
-                val kw = when (text.substring(i, j).lowercase(java.util.Locale.ROOT)) {
+                val w = text.substring(i, j).lowercase(java.util.Locale.ROOT)
+                if (w == "как") {
+                    var k = j
+                    while (k < text.length && text[k].isWhitespace()) k++
+                    var m = k
+                    while (m < text.length && (text[m].isLetterOrDigit() || text[m] == '_')) m++
+                    if (text.substring(k, m).lowercase(java.util.Locale.ROOT) == "только") {
+                        out.add(KwHit(Kw.КАКТОЛЬКО, i, m))
+                        i = m
+                        continue
+                    }
+                }
+                val kw = when (w) {
                     "если", "эсли" -> Kw.ЕСЛИ
                     "то", "тогда" -> Kw.ТО
                     "иначеесли" -> Kw.ИНАЧЕЕСЛИ
@@ -307,8 +329,151 @@ class NcodeInterpreter {
         return count to cmd
     }
 
+    private fun runKakTolko(lines: List<String>, start: Int, base: Int): Int {
+        val first = lines[start].trim()
+        val end = matchEnd(first)
+        if (end >= 0) {
+            if (first.substring(end).trim().isNotEmpty())
+                throw NcodeError("после `конец` ничего не должно быть")
+            val (cond, body) = splitKakSingle(first.substring(0, end))
+            if (body.isEmpty()) throw NcodeError("после `то` пусто — нужна команда")
+            pollAndRun(cond, listOf(BlockItem.Cmd(base + start, body)), base + start)
+            return start + 1
+        }
+        return parseKakBlock(lines, start, base)
+    }
+
+    private fun kakOpenerEnd(t: String): Int {
+        var j = 0
+        repeat(2) {
+            while (j < t.length && t[j].isWhitespace()) j++
+            while (j < t.length && (t[j].isLetterOrDigit() || t[j] == '_')) j++
+        }
+        return j
+    }
+
+    private fun splitToEnd(text: String, contentStart: Int): Pair<String, String> {
+        var depth = 0
+        var toHit: KwHit? = null
+        var closer: KwHit? = null
+        for (h in findKw(text)) {
+            if (h.end <= contentStart) continue
+            when (h.kw) {
+                Kw.ЕСЛИ, Kw.ПОВТОРИ, Kw.КАКТОЛЬКО -> depth++
+                Kw.ТО -> if (depth == 0 && toHit == null) toHit = h
+                Kw.КОНЕЦ -> if (depth == 0) closer = h else depth--
+                else -> {}
+            }
+        }
+        val t = toHit ?: throw NcodeError("после условия нужно `то`")
+        val c = closer ?: throw NcodeError("нет `конец`")
+        return text.substring(contentStart, t.start).trim() to text.substring(t.end, c.start).trim()
+    }
+
+    private fun splitKakSingle(text: String): Pair<String, String> {
+        val (cond, body) = splitToEnd(text, kakOpenerEnd(text.trim()))
+        if (cond.isEmpty()) throw NcodeError("пустое условие")
+        return cond to body
+    }
+
+    private fun parseKakBlock(lines: List<String>, start: Int, base: Int): Int {
+        val t0 = lines[start].trim()
+        var j = 0
+        var seen = 0
+        while (seen < 2 && j < t0.length) {
+            while (j < t0.length && (t0[j].isLetterOrDigit() || t0[j] == '_')) j++
+            seen++
+            while (j < t0.length && t0[j].isWhitespace()) j++
+        }
+        var depth = 0
+        var toEnd = -1
+        var cond = ""
+        for (h in findKw(t0)) {
+            if (h.end <= j) continue
+            when (h.kw) {
+                Kw.ЕСЛИ, Kw.ПОВТОРИ, Kw.КАКТОЛЬКО -> depth++
+                Kw.ТО -> if (depth == 0) {
+                    cond = t0.substring(j, h.start).trim()
+                    toEnd = h.end
+                    break
+                }
+                else -> {}
+            }
+        }
+        if (toEnd < 0) throw NcodeError("после условия нужно `то`")
+        if (cond.isEmpty()) throw NcodeError("пустое условие")
+        val trail = t0.substring(toEnd).trim()
+        if (trailHasBranchKw(trail))
+            throw NcodeError("в многострочном событии команда — с новой строки")
+        val body = mutableListOf<BlockItem>()
+        if (trail.isNotEmpty()) body.add(BlockItem.Cmd(base + start, trail))
+        var i = start + 1
+        var closed = false
+        while (i < lines.size) {
+            val raw = lines[i]
+            val t = raw.trim()
+            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            if (startsKw(t, "иначе", "иначеесли"))
+                throw NcodeError("тут нет `иначе` — только условие и команды")
+            if (startsKw(t, "конец")) {
+                if (t.substring(5).trim().isNotEmpty())
+                    throw NcodeError("после `конец` ничего не должно быть")
+                closed = true; i++; break
+            }
+            val endHit = findKw(t).firstOrNull { it.kw == Kw.КОНЕЦ && it.start > 0 }
+            if (endHit != null) {
+                val before = t.substring(0, endHit.start).trim()
+                if (t.substring(endHit.end).trim().isNotEmpty())
+                    throw NcodeError("после `конец` ничего не должно быть")
+                if (before.isNotEmpty()) body.add(BlockItem.Cmd(base + i, before))
+                closed = true; i++; break
+            }
+            if (startsKw(t, "если", "эсли", "повтори", "повторить", "повторять") || startsKakTolko(t)) {
+                val sub = mutableListOf(raw)
+                var k = i
+                var acc = t
+                while (matchEnd(acc) < 0) {
+                    k++
+                    if (k >= lines.size) throw NcodeError("нет `конец` для вложенного блока")
+                    val tk = lines[k].trim()
+                    if (tk.isEmpty() || tk.startsWith("#") || tk.startsWith("//")) continue
+                    sub.add(lines[k])
+                    acc += " $tk"
+                }
+                body.add(BlockItem.Sub(base + i, sub))
+                i = k + 1; continue
+            }
+            body.add(BlockItem.Cmd(base + i, t))
+            i++
+        }
+        if (!closed) throw NcodeError("нет `конец` для события")
+        pollAndRun(cond, body, base + start)
+        return i
+    }
+
+    private fun pollAndRun(cond: String, body: List<BlockItem>, condLine: Int) {
+        val fire = try {
+            while (!toBool(evalExpression(cond))) {
+                try {
+                    Thread.sleep(100)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw NcodeError("ожидание прервано")
+                }
+            }
+            true
+        } catch (e: NcodeError) {
+            System.err.println("Ошибка в строке $condLine: ${e.message}")
+            execFailed = true
+            false
+        }
+        if (fire) for (item in body) {
+            if (!execItem(item)) break
+        }
+    }
+
     private fun evalRepeatCount(text: String): Int {
-        val v = evalConcat(text)
+        val v = evalExpression(text)
         if (!numberRegex.matches(v))
             throw NcodeError("повторить надо целое число раз, а тут `$v`")
         val d = v.toDouble()
@@ -376,13 +541,15 @@ class NcodeInterpreter {
     private fun matchEnd(text: String): Int {
         val hits = findKw(text)
         if (hits.isEmpty() ||
-            (hits[0].kw != Kw.ЕСЛИ && hits[0].kw != Kw.ПОВТОРИ) || hits[0].start != 0
+            (hits[0].kw != Kw.ЕСЛИ && hits[0].kw != Kw.ПОВТОРИ && hits[0].kw != Kw.КАКТОЛЬКО) ||
+            hits[0].start != 0
         ) return -1
         var depth = 1
         for (h in hits.drop(1)) {
             when (h.kw) {
                 Kw.ЕСЛИ -> depth++
                 Kw.ПОВТОРИ -> depth++
+                Kw.КАКТОЛЬКО -> depth++
                 Kw.КОНЕЦ -> {
                     depth--
                     if (depth == 0) return h.end
@@ -407,6 +574,7 @@ class NcodeInterpreter {
             when (h.kw) {
                 Kw.ЕСЛИ -> depth++
                 Kw.ПОВТОРИ -> depth++
+                Kw.КАКТОЛЬКО -> depth++
                 Kw.КОНЕЦ -> if (depth == 0) {
                     when (state) {
                         1 -> cmds.add(text.substring(cmdStart, h.start))
@@ -457,6 +625,10 @@ class NcodeInterpreter {
             if (matchEnd(t) < 0) throw NcodeError("повтор в одну строку — допиши `конец`")
             runRepeat(listOf(t), 0, lineNo)
         }
+        else if (startsKakTolko(t)) {
+            if (matchEnd(t) < 0) throw NcodeError("событие в одну строку — допиши `конец`")
+            runKakTolko(listOf(t), 0, lineNo)
+        }
         else runLine(t)
     }
 
@@ -471,7 +643,11 @@ class NcodeInterpreter {
                 runWait(line)
             low == "спросить" || low.startsWith("спросить ") || low.startsWith("спросить\t") ->
                 runAsk(line)
-            else -> throw NcodeError("неизвестная команда (нужно: задать / напечатать / печатать / вывести / ждать / спросить / если / повтори)")
+            low == "изменить" || low.startsWith("изменить ") || low.startsWith("изменить\t") ->
+                runIzmenit(line, "изменить")
+            low == "поменять" || low.startsWith("поменять ") || low.startsWith("поменять\t") ->
+                runIzmenit(line, "поменять")
+            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / напечатать / печатать / вывести / ждать / спросить / если / повтори)")
         }
     }
 
@@ -487,16 +663,28 @@ class NcodeInterpreter {
     }
 
     private fun runZadat(line: String) {
-        val rest = keywordTail(line, line.trim().substring(0, 6))
-        if (rest.isEmpty()) throw NcodeError("нужно: задать <имя> <значение>")
+        val (name, value) = parseAssign(line, "задать")
+        if (vars.containsKey(name.lowercase())) throw NcodeError("`$name` уже есть — используй `изменить`")
+        vars[name.lowercase()] = value
+    }
+
+    private fun runIzmenit(line: String, keyword: String) {
+        val (name, value) = parseAssign(line, keyword)
+        if (!vars.containsKey(name.lowercase())) throw NcodeError("нет `$name` — сначала `задать`")
+        vars[name.lowercase()] = value
+    }
+
+    private fun parseAssign(line: String, keyword: String): Pair<String, String> {
+        val rest = keywordTail(line, keyword)
+        if (rest.isEmpty()) throw NcodeError("нужно: $keyword <имя> <значение>")
         val splitAt = rest.indexOfFirst { it.isWhitespace() }
-        if (splitAt < 0) throw NcodeError("нужно: задать <имя> <значение>")
+        if (splitAt < 0) throw NcodeError("нужно: $keyword <имя> <значение>")
         val name = rest.substring(0, splitAt)
         val expr = rest.substring(splitAt).trim()
         if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
         if (name.lowercase() in reserved) throw NcodeError("`$name` — служебное слово, возьми другое имя")
-        if (expr.isEmpty()) throw NcodeError("нужно: задать <имя> <значение>")
-        vars[name.lowercase()] = evalExpression(expr)
+        if (expr.isEmpty()) throw NcodeError("нужно: $keyword <имя> <значение>")
+        return name to evalExpression(expr)
     }
 
     private fun runPrint(line: String) {
@@ -509,11 +697,12 @@ class NcodeInterpreter {
     }
 
     fun evalExpression(expr: String): String {
-        splitByWordOp(expr, "или")?.let { parts ->
+        val e = normalizeSymbols(expr)
+        splitByWordOp(e, "или")?.let { parts ->
             if (parts.any { it.trim().isEmpty() }) throw NcodeError("у `или` пусто слева или справа")
             return if (parts.any { toBool(evalAnd(it)) }) "истина" else "ложь"
         }
-        return evalAnd(expr)
+        return evalAnd(e)
     }
 
     private fun evalAnd(expr: String): String {
@@ -526,7 +715,7 @@ class NcodeInterpreter {
 
     private fun evalComparison(expr: String): String {
         val low = expr.lowercase(java.util.Locale.ROOT)
-        val m = cmpRegex.find(low) ?: return evalConcat(expr)
+        val m = cmpRegex.find(low) ?: return evalAddSub(expr)
         val leadLen = m.groupValues[1].length
         val left = expr.substring(0, m.range.first + leadLen)
         val right = expr.substring(m.range.last + 1)
@@ -534,25 +723,28 @@ class NcodeInterpreter {
             throw NcodeError("у сравнения нужны левая и правая части")
         if (cmpRegex.containsMatchIn(right.lowercase(java.util.Locale.ROOT)))
             throw NcodeError("только одно сравнение в выражении")
-        return compareValues(evalConcat(left), evalConcat(right), opOf(m.groupValues[2]))
+        return compareValues(evalAddSub(left), evalAddSub(right), opOf(m.groupValues[2]))
     }
 
     private fun runWait(line: String) {
         val rest = keywordTail(line, "ждать")
         if (rest.isEmpty())
             throw NcodeError("нужно: ждать <число> <секунду|минуту|час>, пример: ждать 2 секунды")
-        val parts = rest.split(Regex("\\s+"))
-        if (parts.size != 2)
+        val cut = rest.trim().indexOfLast { it.isWhitespace() }
+        if (cut < 0)
             throw NcodeError("нужно: ждать <число> <секунду|минуту|час>, пример: ждать 2 секунды")
-        if (!numberRegex.matches(parts[0])) throw NcodeError("`${parts[0]}` — не число")
-        val amount = parts[0].toDouble()
+        val numText = rest.trim().substring(0, cut).trim()
+        val unit = rest.trim().substring(cut).trim()
+        val numVal = evalExpression(numText)
+        if (!numberRegex.matches(numVal)) throw NcodeError("`${numText}` — не число")
+        val amount = numVal.toDouble()
         if (amount < 0) throw NcodeError("время не может быть отрицательным")
-        val mult = when (parts[1].lowercase(java.util.Locale.ROOT)) {
+        val mult = when (unit.lowercase(java.util.Locale.ROOT)) {
             "секунда", "секунды", "секунд", "секунду" -> 1_000.0
             "минута", "минуты", "минут", "минуту" -> 60_000.0
             "час", "часа", "часов" -> 3_600_000.0
             else -> throw NcodeError(
-                "не знаю единицу `${parts[1]}` " +
+                "не знаю единицу `$unit` " +
                 "(можно: секунду/секунды/секунд, минуту/минуты/минут, час/часа/часов)"
             )
         }
@@ -636,6 +828,150 @@ class NcodeInterpreter {
         if (!nameRegex.matches(name))
             throw NcodeError("после `сохранить в` нужно одно имя, пример: сохранить в имя")
         return rest.substring(0, cut.first).trim() to name
+    }
+
+    private fun normalizeSymbols(expr: String): String {
+        val out = StringBuilder()
+        var i = 0
+        var inQuotes = false
+        var needOperand = true
+        while (i < expr.length) {
+            val c = expr[i]
+            if (c == '"') {
+                inQuotes = !inQuotes
+                if (!inQuotes) needOperand = false
+                out.append(c)
+                i++
+                continue
+            }
+            if (inQuotes) {
+                out.append(c)
+                i++
+                continue
+            }
+            val two = if (i + 1 < expr.length) expr.substring(i, i + 2) else ""
+            val pair = when (two) {
+                "==" -> " равно "
+                "!=" -> " неравно "
+                ">=" -> " больше или равно "
+                "<=" -> " меньше или равно "
+                "&&" -> " и "
+                "||" -> " или "
+                else -> null
+            }
+            if (pair != null) {
+                out.append(pair)
+                i += 2
+                needOperand = true
+                continue
+            }
+            val one = when (c) {
+                '=' -> " равно "
+                '>' -> " больше "
+                '<' -> " меньше "
+                '*' -> " умножить "
+                '/' -> " разделить "
+                '%' -> " остаток "
+                else -> null
+            }
+            if (one != null) {
+                out.append(one)
+                i++
+                needOperand = true
+                continue
+            }
+            if (c == '+' || c == '-') {
+                if (needOperand) {
+                    out.append(c)
+                    i++
+                    continue
+                }
+                out.append(if (c == '+') " плюс " else " минус ")
+                i++
+                needOperand = true
+                continue
+            }
+            if (!c.isWhitespace()) needOperand = false
+            out.append(c)
+            i++
+        }
+        return out.toString()
+    }
+
+    private fun splitWithOps(expr: String, alts: String): Pair<List<String>, List<String>>? {
+        val low = expr.lowercase(java.util.Locale.ROOT)
+        val rx = Regex("(^|[\\s\".])($alts)(?=$|[\\s\".])")
+        val matches = rx.findAll(low).toList()
+        if (matches.isEmpty()) return null
+        val parts = mutableListOf<String>()
+        val ops = mutableListOf<String>()
+        var pos = 0
+        for (m in matches) {
+            parts.add(expr.substring(pos, m.range.first + m.groupValues[1].length))
+            ops.add(m.groupValues[2])
+            pos = m.range.last + 1
+        }
+        parts.add(expr.substring(pos))
+        return parts to ops
+    }
+
+    private fun evalAddSub(expr: String): String {
+        val split = splitWithOps(expr, "плюс|минус") ?: return evalMulDiv(expr)
+        val parts = split.first
+        val ops = split.second
+        var idx = 0
+        var acc: Double
+        if (parts[0].trim().isEmpty()) {
+            if (parts[1].trim().isEmpty()) throw NcodeError("у операции нужны числа слева и справа")
+            acc = evalArithOperand(parts[1])
+            if (ops[0].lowercase(java.util.Locale.ROOT) == "минус") acc = -acc
+            idx = 1
+        } else {
+            acc = evalArithOperand(parts[0])
+        }
+        while (idx < ops.size) {
+            if (parts[idx + 1].trim().isEmpty()) throw NcodeError("у операции нужны числа слева и справа")
+            val r = evalArithOperand(parts[idx + 1])
+            acc = if (ops[idx].lowercase(java.util.Locale.ROOT) == "плюс") acc + r else acc - r
+            idx++
+        }
+        return fmtNum(acc)
+    }
+
+    private fun evalMulDiv(expr: String): String {
+        val split = splitWithOps(expr, "умножить|разделить|поделить|остаток") ?: return evalConcat(expr)
+        val parts = split.first
+        val ops = split.second
+        if (parts.any { it.trim().isEmpty() }) throw NcodeError("у операции нужны числа слева и справа")
+        var acc = evalArithOperand(parts[0])
+        for (k in ops.indices) {
+            val r = evalArithOperand(parts[k + 1])
+            val op = ops[k].lowercase(java.util.Locale.ROOT)
+            acc = when (op) {
+                "умножить" -> acc * r
+                "остаток" -> {
+                    if (r == 0.0) throw NcodeError("на ноль делить нельзя")
+                    acc % r
+                }
+                else -> {
+                    if (r == 0.0) throw NcodeError("на ноль делить нельзя")
+                    acc / r
+                }
+            }
+        }
+        return fmtNum(acc)
+    }
+
+    private fun evalArithOperand(t: String): Double {
+        val v = evalMulDiv(t)
+        if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
+        return v.toDouble()
+    }
+
+    private fun fmtNum(d: Double): String {
+        if (!d.isFinite()) throw NcodeError("не число вышло")
+        val r = if (kotlin.math.abs(d) < 1e15) kotlin.math.round(d * 1e10) / 1e10 else d
+        return if (r == kotlin.math.floor(r) && kotlin.math.abs(r) < 9e18) r.toLong().toString() else r.toString()
     }
 
     private fun evalConcat(expr: String): String {
@@ -738,14 +1074,16 @@ private fun enableUtf8Console() {
 }
 
 private val HELP = """
-    Ncode v0.7 — русский мини-язык (.ncode, UTF-8)
+    Ncode v0.10 — русский мини-язык (.ncode, UTF-8)
     Использование:
       Ncode программа.ncode   — выполнить файл
       Ncode -help             — эта справка
     Команды (регистр не важен, одна строка — одна команда):
-      задать <имя> <значение>              — создать/перезаписать переменную
+      задать <имя> <значение>              — создать НОВУЮ переменную
         задать какашка истина
         задать какашка "иван"              — взять значение из переменной иван
+      изменить|поменять <имя> <значение>   — поменять СУЩЕСТВУЮЩУЮ переменную
+        изменить какашка ложь
       напечатать|печатать|вывести <что>    — вывести текст, число или "переменную"
         напечатать хеллоу ворлд
         напечатать "иван" .. пробел .. "нептун"
@@ -763,6 +1101,11 @@ private val HELP = """
         напечатать привет
         конец
         (счёт: раз, раза, разов; можно из переменной: повтори "мало" раз)
+      как только <условие> то — событие: ждёт правды, выполняет тело раз
+        как только 2 плюс 2 равно 4 то вывести сработало конец
+    Знаки — то же словами: + плюс, - минус, * умножить, / разделить, % остаток,
+      = и == равно, != неравно, > больше, < меньше, >= <=, && и, || или
+    Выражения: .. > умножить/разделить/остаток > плюс/минус > сравнение > и > или
     Выражения: .. (склейка) > сравнение > и > или
       сравнения: равно/равняется, неравно/неравняется, больше, меньше,
                  больше или равно/равняется, меньше или равно/равняется
