@@ -767,7 +767,7 @@ class NcodeInterpreter {
         if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
         if (name.lowercase() in reserved) throw NcodeError("`$name` — служебное слово, возьми другое имя")
         if (prompt.isNotEmpty()) {
-            print(evalConcat(prompt))
+            print(evalConcat(prompt) + " ")
             System.out.flush()
         }
         if (stdin == null) stdin = java.io.BufferedReader(
@@ -1114,6 +1114,8 @@ private val HELP = """
 """.trimIndent()
 
 fun main(args: Array<String>) {
+    System.setOut(java.io.PrintStream(java.io.BufferedOutputStream(java.io.FileOutputStream(java.io.FileDescriptor.out)), true, "UTF-8"))
+    System.setErr(java.io.PrintStream(java.io.BufferedOutputStream(java.io.FileOutputStream(java.io.FileDescriptor.err)), true, "UTF-8"))
     enableUtf8Console()
     if (args.isEmpty() || args[0].lowercase() in
         setOf("-help", "--help", "-h", "/?", "помощь", "справка")
