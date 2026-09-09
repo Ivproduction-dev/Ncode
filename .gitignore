@@ -1,0 +1,25 @@
+.gradle
+**/build/
+!**/src/**/build/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+.gradletasknamecache
+.project
+.classpath
+
+# Kotlin/JVM
+*.class
+out/
+.idea/
+*.iml
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Jars: игнорим все, кроме нужного ncode.jar
+*.jar
+!ncode.jar
+!gradle-wrapper.jar
