@@ -333,7 +333,7 @@ class NcodeInterpreter {
                 is BlockItem.Sub -> {
                     val before = execFailed
                     execFailed = false
-                    val failed = runLines(item.lines, item.firstLine) != 0 || execFailed
+                    val failed = runLines(item.lines, item.firstLine, false) != 0 || execFailed
                     execFailed = before || failed
                     !failed
                 }
@@ -721,7 +721,9 @@ class NcodeInterpreter {
                 runIzmenit(line, "изменить")
             low == "поменять" || low.startsWith("поменять ") || low.startsWith("поменять\t") ->
                 runIzmenit(line, "поменять")
-            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / напечатать / печатать / вывести / ждать / спросить / если / повтори)")
+            low == "вещать" || low.startsWith("вещать ") || low.startsWith("вещать\t") ->
+                runVeshat(line)
+            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать)")
         }
     }
 
@@ -1251,7 +1253,7 @@ private fun enableUtf8Console() {
 }
 
 private val HELP = """
-    Ncode 1.1 — русский мини-язык (.ncode, UTF-8)
+    Ncode 1.2 — русский мини-язык (.ncode, UTF-8)
     Использование:
       Ncode программа.ncode   — выполнить файл
       Ncode -help             — эта справка
@@ -1280,16 +1282,19 @@ private val HELP = """
         (счёт: раз, раза, разов; можно из переменной: повтори "мало" раз)
       как только <условие> то — событие: ждёт правды, выполняет тело раз
         как только 2 плюс 2 равно 4 то вывести сработало конец
+      вещать всем <сообщение> — событие всем «когда будет получено»
+        вещать всем какашка
+      Когда будет получено <сообщение> — обработчик (конец не пишем)
+        когда будет получено какашка
     Знаки — то же словами: + плюс, - минус, * умножить, / разделить, % остаток,
       = и == равно, != неравно, > больше, < меньше, >= <=, && и, || или
     Формулы (везде, где значение): случайно 1 5, корень 9, модуль -5,
       округлить 3.7, степень 2 10, минимум 3 7, максимум 3 7, длина "слово"
     Выражения: .. > умножить/разделить/остаток > плюс/минус > сравнение > и > или
-    Выражения: .. (склейка) > сравнение > и > или
       сравнения: равно/равняется, неравно/неравняется, больше, меньше,
                  больше или равно/равняется, меньше или равно/равняется
       правда: истина/да/правда; ложь: ложь/нет/неправда
-    Примеры: пример.ncode, пример2.ncode, пример3.ncode. Дока: NCODE_v0.1.md
+    Примеры: test.ncode, test2.ncode. Дока: NCODE_v0.1.md
 """.trimIndent()
 
 fun main(args: Array<String>) {
@@ -1308,6 +1313,13 @@ fun main(args: Array<String>) {
         kotlin.system.exitProcess(2)
     }
     val lines = file.readLines(Charsets.UTF_8)
-    val code = NcodeInterpreter().runLines(lines)
+    val interp = NcodeInterpreter()
+    try {
+        interp.extractHandlers(lines)
+    } catch (e: NcodeError) {
+        System.err.println("Ошибка: " + e.message)
+        kotlin.system.exitProcess(1)
+    }
+    val code = interp.runLines(lines)
     if (code != 0) kotlin.system.exitProcess(code)
 }
