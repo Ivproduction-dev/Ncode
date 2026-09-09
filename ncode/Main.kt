@@ -26,11 +26,11 @@ class NcodeInterpreter {
 
     private enum class Cmp { EQ, NE, GT, LT, GE, LE }
 
-    fun runLines(lines: List<String>, base: Int = 1, top: Boolean = true): Int {
+    fun runLines(lines: List<String>, base: Int = 1, skips: List<IntRange> = emptyList()): Int {
         var hadError = false
         var i = 0
         while (i < lines.size) {
-            val skip = if (top) skipRanges.firstOrNull { i in it } else null
+            val skip = skips.firstOrNull { i in it }
             if (skip != null) { i = skip.last + 1; continue }
             val rawLine = lines[i]
             val line = rawLine.trim()
@@ -62,10 +62,15 @@ class NcodeInterpreter {
     private data class Handler(val msgExpr: String, val headerLine: Int, val lines: List<String>, val base: Int)
 
     private val handlers = mutableListOf<Handler>()
-    private val skipRanges = mutableListOf<IntRange>()
+    private val scriptStack = mutableListOf<String>()
+
+    fun pushScript(canon: String) {
+        scriptStack.add(canon)
+    }
     private var broadcastDepth = 0
 
-    fun extractHandlers(lines: List<String>) {
+    fun extractHandlers(lines: List<String>): List<IntRange> {
+        val skips = mutableListOf<IntRange>()
         var i = 0
         while (i < lines.size) {
             val t = lines[i].trim()
@@ -81,8 +86,9 @@ class NcodeInterpreter {
                 i++
             }
             handlers.add(Handler(msg, start + 1, body, start + 2))
-            skipRanges.add(start..i - 1)
+            skips.add(start..i - 1)
         }
+        return skips
     }
 
     private fun handlerMsg(t: String): String? {
@@ -122,11 +128,57 @@ class NcodeInterpreter {
                     continue
                 }
                 if (want == value) {
-                    if (runLines(h.lines, h.base, false) != 0) execFailed = true
+                    if (runLines(h.lines, h.base) != 0) execFailed = true
                 }
             }
         } finally {
             broadcastDepth--
+        }
+    }
+
+    private fun runZapustit(line: String, keyword: String) {
+        var rest = keywordTail(line, keyword)
+        if (startsKw(rest, "скрипт")) rest = rest.trim().substring(6).trim()
+        if (rest.isEmpty()) throw NcodeError("нужно: запустить скрипт <путь>, пример: запустить скрипт images/игра.ncode")
+        runScriptFile(rest)
+    }
+
+    private fun runScriptFile(rawPath: String) {
+        val given = java.io.File(rawPath)
+        val fromDir = scriptStack.lastOrNull()?.let { java.io.File(it).parentFile }
+        val file = when {
+            given.isAbsolute -> given
+            fromDir != null && java.io.File(fromDir, rawPath).exists() -> java.io.File(fromDir, rawPath)
+            java.io.File(rawPath).exists() -> java.io.File(rawPath)
+            fromDir != null -> java.io.File(fromDir, rawPath)
+            else -> given
+        }
+        if (!file.isFile) throw NcodeError("нет файла `$rawPath`")
+        val canon = try {
+            file.canonicalPath
+        } catch (e: Exception) {
+            throw NcodeError("плохой путь `$rawPath`")
+        }
+        if (canon in scriptStack) throw NcodeError("скрипты зациклились")
+        if (scriptStack.size >= 50) throw NcodeError("слишком глубокая вложенность скриптов")
+        val sub = try {
+            file.readLines(Charsets.UTF_8)
+        } catch (e: Exception) {
+            throw NcodeError("не могу прочитать `$rawPath`")
+        }
+        val skips = try {
+            extractHandlers(sub)
+        } catch (e: NcodeError) {
+            throw NcodeError(e.message + " (в скрипте " + rawPath + ")")
+        }
+        scriptStack.add(canon)
+        try {
+            if (runLines(sub, 1, skips) != 0) {
+                System.err.println("в скрипте $rawPath")
+                execFailed = true
+            }
+        } finally {
+            scriptStack.removeAt(scriptStack.size - 1)
         }
     }
 
@@ -204,6 +256,25 @@ class NcodeInterpreter {
         return acc.substring(0, endPos) to (idx + 1)
     }
 
+    private fun firstWordEnd(t: String): Int {
+        var j = 0
+        while (j < t.length && (t[j].isLetterOrDigit() || t[j] == '_')) j++
+        return j
+    }
+
+    private fun splitHeaderTo(first: String, contentStart: Int): Pair<String, String?> {
+        var depth = 0
+        for (h in findKw(first)) {
+            if (h.end <= contentStart) continue
+            when (h.kw) {
+                Kw.ЕСЛИ, Kw.ПОВТОРИ, Kw.КАКТОЛЬКО -> depth++
+                Kw.ТО -> if (depth == 0) return first.substring(contentStart, h.start).trim() to first.substring(h.end).trim()
+                else -> {}
+            }
+        }
+        return "" to null
+    }
+
     private fun runIf(lines: List<String>, start: Int, base: Int): Int {
         val first = lines[start].trim()
         val end = matchEnd(first)
@@ -213,7 +284,10 @@ class NcodeInterpreter {
             parseIf(first.substring(0, end), base + start)
             return start + 1
         }
-        return parseBlock(lines, start, base)
+        val (_, trail) = splitHeaderTo(first, firstWordEnd(first))
+        if (trail.isNullOrEmpty()) return parseBlock(lines, start, base)
+        parseIf(first, base + start)
+        return start + 1
     }
     private sealed interface BlockItem {
         data class Cmd(val lineNo: Int, val text: String) : BlockItem
@@ -333,7 +407,7 @@ class NcodeInterpreter {
                 is BlockItem.Sub -> {
                     val before = execFailed
                     execFailed = false
-                    val failed = runLines(item.lines, item.firstLine, false) != 0 || execFailed
+                    val failed = runLines(item.lines, item.firstLine) != 0 || execFailed
                     execFailed = before || failed
                     !failed
                 }
@@ -362,7 +436,11 @@ class NcodeInterpreter {
             repeat(n) { execCmd(body, base + start) }
             return start + 1
         }
-        return parseRepeatBlock(lines, start, base)
+        val (countText, trail, _) = splitRepeatUnit(first, firstWordEnd(first))
+        if (trail.isEmpty()) return parseRepeatBlock(lines, start, base)
+        val n = evalRepeatCount(countText)
+        repeat(n) { execCmd(trail, base + start) }
+        return start + 1
     }
 
     private fun splitRepeatUnit(t: String, from: Int): Triple<String, String, Int> {
@@ -414,7 +492,11 @@ class NcodeInterpreter {
             pollAndRun(cond, listOf(BlockItem.Cmd(base + start, body)), base + start)
             return start + 1
         }
-        return parseKakBlock(lines, start, base)
+        val (cond, trail) = splitHeaderTo(first, kakOpenerEnd(first))
+        if (trail.isNullOrEmpty()) return parseKakBlock(lines, start, base)
+        if (cond.isEmpty()) throw NcodeError("пустое условие")
+        pollAndRun(cond, listOf(BlockItem.Cmd(base + start, trail)), base + start)
+        return start + 1
     }
 
     private fun kakOpenerEnd(t: String): Int {
@@ -644,25 +726,28 @@ class NcodeInterpreter {
         var state = 0
         var segStart = hits[0].end
         var cmdStart = 0
+        fun finish(bound: Int) {
+            when (state) {
+                1 -> cmds.add(text.substring(cmdStart, bound))
+                2 -> elseCmd = text.substring(cmdStart, bound)
+                else -> throw NcodeError("после условия нужно `то`")
+            }
+            if (cmds.any { it.trim().isEmpty() })
+                throw NcodeError("после `то` пусто")
+            if (hasElse && elseCmd!!.trim().isEmpty())
+                throw NcodeError("после `иначе` пусто")
+            for (k in conds.indices) {
+                if (toBool(evalExpression(conds[k]))) { execCmd(cmds[k], lineNo); return }
+            }
+            if (hasElse) execCmd(elseCmd!!, lineNo)
+        }
         for (h in hits.drop(1)) {
             when (h.kw) {
                 Kw.ЕСЛИ -> depth++
                 Kw.ПОВТОРИ -> depth++
                 Kw.КАКТОЛЬКО -> depth++
                 Kw.КОНЕЦ -> if (depth == 0) {
-                    when (state) {
-                        1 -> cmds.add(text.substring(cmdStart, h.start))
-                        2 -> elseCmd = text.substring(cmdStart, h.start)
-                        else -> throw NcodeError("после условия нужно `то`")
-                    }
-                    if (cmds.any { it.trim().isEmpty() })
-                        throw NcodeError("после `то` пусто")
-                    if (hasElse && elseCmd!!.trim().isEmpty())
-                        throw NcodeError("после `иначе` пусто")
-                    for (k in conds.indices) {
-                        if (toBool(evalExpression(conds[k]))) { execCmd(cmds[k], lineNo); return }
-                    }
-                    if (hasElse) execCmd(elseCmd!!, lineNo)
+                    finish(h.start)
                     return
                 } else depth--
                 Kw.ТО -> if (depth == 0) {
@@ -688,21 +773,15 @@ class NcodeInterpreter {
                 }
             }
         }
-        throw NcodeError("нет `конец`")
+        finish(text.length)
     }
 
     private fun execCmd(cmd: String, lineNo: Int) {
         val t = cmd.trim()
         if (t.isEmpty()) throw NcodeError("пустая команда в ветке")
         if (startsKw(t, "если", "эсли")) parseIf(t, lineNo)
-        else if (startsKw(t, "повтори", "повторить", "повторять")) {
-            if (matchEnd(t) < 0) throw NcodeError("повтор в одну строку — допиши `конец`")
-            runRepeat(listOf(t), 0, lineNo)
-        }
-        else if (startsKakTolko(t)) {
-            if (matchEnd(t) < 0) throw NcodeError("событие в одну строку — допиши `конец`")
-            runKakTolko(listOf(t), 0, lineNo)
-        }
+        else if (startsKw(t, "повтори", "повторить", "повторять")) runRepeat(listOf(t), 0, lineNo)
+        else if (startsKakTolko(t)) runKakTolko(listOf(t), 0, lineNo)
         else runLine(t)
     }
 
@@ -723,7 +802,11 @@ class NcodeInterpreter {
                 runIzmenit(line, "поменять")
             low == "вещать" || low.startsWith("вещать ") || low.startsWith("вещать\t") ->
                 runVeshat(line)
-            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать)")
+            low == "запустить" || low.startsWith("запустить ") || low.startsWith("запустить\t") ->
+                runZapustit(line, "запустить")
+            low == "выполнить" || low.startsWith("выполнить ") || low.startsWith("выполнить\t") ->
+                runZapustit(line, "выполнить")
+            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / запустить)")
         }
     }
 
@@ -1253,7 +1336,7 @@ private fun enableUtf8Console() {
 }
 
 private val HELP = """
-    Ncode 1.2 — русский мини-язык (.ncode, UTF-8)
+    Ncode 1.4 — русский мини-язык (.ncode, UTF-8)
     Использование:
       Ncode программа.ncode   — выполнить файл
       Ncode -help             — эта справка
@@ -1282,10 +1365,14 @@ private val HELP = """
         (счёт: раз, раза, разов; можно из переменной: повтори "мало" раз)
       как только <условие> то — событие: ждёт правды, выполняет тело раз
         как только 2 плюс 2 равно 4 то вывести сработало конец
+      конец — закрывает блок; в одну строку можно не писать:
+        если да то вывести а
       вещать всем <сообщение> — событие всем «когда будет получено»
         вещать всем какашка
       Когда будет получено <сообщение> — обработчик (конец не пишем)
         когда будет получено какашка
+      запустить [скрипт] <путь> — выполнить другой файл (переменные общие)
+        запустить скрипт images/игра.ncode
     Знаки — то же словами: + плюс, - минус, * умножить, / разделить, % остаток,
       = и == равно, != неравно, > больше, < меньше, >= <=, && и, || или
     Формулы (везде, где значение): случайно 1 5, корень 9, модуль -5,
@@ -1314,12 +1401,14 @@ fun main(args: Array<String>) {
     }
     val lines = file.readLines(Charsets.UTF_8)
     val interp = NcodeInterpreter()
-    try {
+    val mainSkips = try {
         interp.extractHandlers(lines)
     } catch (e: NcodeError) {
         System.err.println("Ошибка: " + e.message)
         kotlin.system.exitProcess(1)
+        return
     }
-    val code = interp.runLines(lines)
+    interp.pushScript(file.canonicalPath)
+    val code = interp.runLines(lines, 1, mainSkips)
     if (code != 0) kotlin.system.exitProcess(code)
 }
