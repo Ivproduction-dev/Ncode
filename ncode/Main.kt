@@ -10,7 +10,8 @@ class NcodeInterpreter {
         "равно", "равняется", "неравно", "неравняется", "больше", "меньше",
         "плюс", "минус", "умножить", "разделить", "поделить", "остаток",
         "если", "эсли", "то", "тогда", "иначеесли", "иначе", "конец",
-        "повтори", "повторить", "повторять"
+        "повтори", "повторить", "повторять",
+        "случайно", "корень", "модуль", "округлить", "степень", "минимум", "максимум", "длина"
     )
 
     private val cmpBody =
@@ -25,10 +26,12 @@ class NcodeInterpreter {
 
     private enum class Cmp { EQ, NE, GT, LT, GE, LE }
 
-    fun runLines(lines: List<String>, base: Int = 1): Int {
+    fun runLines(lines: List<String>, base: Int = 1, top: Boolean = true): Int {
         var hadError = false
         var i = 0
         while (i < lines.size) {
+            val skip = if (top) skipRanges.firstOrNull { i in it } else null
+            if (skip != null) { i = skip.last + 1; continue }
             val rawLine = lines[i]
             val line = rawLine.trim()
             if (line.isEmpty() || line.startsWith("#") || line.startsWith("//")) { i++; continue }
@@ -54,6 +57,77 @@ class NcodeInterpreter {
             }
         }
         return if (hadError || execFailed) 1 else 0
+    }
+
+    private data class Handler(val msgExpr: String, val headerLine: Int, val lines: List<String>, val base: Int)
+
+    private val handlers = mutableListOf<Handler>()
+    private val skipRanges = mutableListOf<IntRange>()
+    private var broadcastDepth = 0
+
+    fun extractHandlers(lines: List<String>) {
+        var i = 0
+        while (i < lines.size) {
+            val t = lines[i].trim()
+            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            val msg = handlerMsg(t)
+            if (msg == null) { i++; continue }
+            if (msg.isEmpty()) throw NcodeError("строка ${i + 1}: после `когда будет получено` нужно сообщение")
+            val start = i
+            i++
+            val body = mutableListOf<String>()
+            while (i < lines.size && handlerMsg(lines[i].trim()) == null) {
+                body.add(lines[i])
+                i++
+            }
+            handlers.add(Handler(msg, start + 1, body, start + 2))
+            skipRanges.add(start..i - 1)
+        }
+    }
+
+    private fun handlerMsg(t: String): String? {
+        val parts = t.trim().split(Regex("\\s+"))
+        if (parts.size < 2 || parts[0].lowercase(java.util.Locale.ROOT) != "когда") return null
+        val second = parts[1].lowercase(java.util.Locale.ROOT)
+        val n = when {
+            second == "получено" -> 2
+            second == "будет" && parts.size >= 3 && parts[2].lowercase(java.util.Locale.ROOT) == "получено" -> 3
+            else -> return null
+        }
+        val s = t.trim()
+        var j = 0
+        var seen = 0
+        while (seen < n && j < s.length) {
+            while (j < s.length && (s[j].isLetterOrDigit() || s[j] == '_')) j++
+            seen++
+            while (j < s.length && s[j].isWhitespace()) j++
+        }
+        return s.substring(j).trim()
+    }
+
+    private fun runVeshat(line: String) {
+        var msg = keywordTail(line, "вещать")
+        if (startsKw(msg, "всем")) msg = msg.trim().substring(4).trim()
+        if (msg.isEmpty()) throw NcodeError("нужно: вещать всем <сообщение>")
+        val value = evalExpression(msg)
+        if (broadcastDepth >= 100) throw NcodeError("события зациклились")
+        broadcastDepth++
+        try {
+            for (h in handlers) {
+                val want = try {
+                    evalExpression(h.msgExpr)
+                } catch (e: NcodeError) {
+                    System.err.println("Ошибка в строке ${h.headerLine}: ${e.message}")
+                    execFailed = true
+                    continue
+                }
+                if (want == value) {
+                    if (runLines(h.lines, h.base, false) != 0) execFailed = true
+                }
+            }
+        } finally {
+            broadcastDepth--
+        }
     }
 
     private fun startsKakTolko(line: String): Boolean {
@@ -830,6 +904,12 @@ class NcodeInterpreter {
         return rest.substring(0, cut.first).trim() to name
     }
 
+    private val opWordsForUnary = setOf(
+        "и", "или",
+        "равно", "равняется", "неравно", "неравняется", "больше", "меньше",
+        "плюс", "минус", "умножить", "разделить", "поделить", "остаток"
+    )
+
     private fun normalizeSymbols(expr: String): String {
         val out = StringBuilder()
         var i = 0
@@ -882,6 +962,16 @@ class NcodeInterpreter {
             }
             if (c == '+' || c == '-') {
                 if (needOperand) {
+                    out.append(c)
+                    i++
+                    continue
+                }
+                var k = i - 1
+                while (k >= 0 && expr[k].isWhitespace()) k--
+                var m = k
+                while (m >= 0 && (expr[m].isLetterOrDigit() || expr[m] == '_')) m--
+                val prev = expr.substring(m + 1, k + 1).lowercase(java.util.Locale.ROOT)
+                if (prev in opWordsForUnary || prev in funcArity.keys) {
                     out.append(c)
                     i++
                     continue
@@ -1054,11 +1144,98 @@ class NcodeInterpreter {
             return vars[inner.lowercase()] ?: throw NcodeError("нет переменной \"$inner\"")
         }
         val low = t.lowercase()
+        val toks = t.split(Regex("\\s+"))
+        val arity = funcArity[toks[0].lowercase(java.util.Locale.ROOT)]
+        if (arity != null) {
+            val args = toks.drop(1)
+            if (args.size != arity) throw NcodeError(
+                "в `" + toks[0].lowercase(java.util.Locale.ROOT) + "` надо " +
+                (if (arity == 1) "1 аргумент" else "$arity аргумента") +
+                ", а тут " + args.size
+            )
+            return evalFunc(toks[0].lowercase(java.util.Locale.ROOT), args)
+        }
         if (low in trueWords) return "истина"
         if (low in falseWords) return "ложь"
         if (!single && low == "пробел") return " "
         if (numberRegex.matches(t)) return t
         return t
+    }
+
+    private val funcArity = mapOf(
+        "случайно" to 2,
+        "корень" to 1,
+        "модуль" to 1,
+        "округлить" to 1,
+        "степень" to 2,
+        "минимум" to 2,
+        "максимум" to 2,
+        "длина" to 1
+    )
+
+    private fun resolveToken(tok: String): String {
+        val t = tok.trim()
+        if (t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")) {
+            val inner = t.substring(1, t.length - 1).trim()
+            if (!nameRegex.matches(inner)) throw NcodeError("плохое имя в кавычках `\"$inner\"`")
+            return vars[inner.lowercase()] ?: throw NcodeError("нет переменной \"$inner\"")
+        }
+        if (numberRegex.matches(t)) return t
+        val low = t.lowercase(java.util.Locale.ROOT)
+        if (low in trueWords) return "истина"
+        if (low in falseWords) return "ложь"
+        throw NcodeError("не понимаю `$tok` — нужно число или \"переменная\"")
+    }
+
+    private fun numArg(fname: String, tok: String): Double {
+        val v = resolveToken(tok)
+        if (!numberRegex.matches(v)) throw NcodeError("в `$fname` нужно число, а тут `$v`")
+        return v.toDouble()
+    }
+
+    private fun evalFunc(fname: String, args: List<String>): String {
+        when (fname) {
+            "случайно" -> {
+                val a = numArg(fname, args[0])
+                val b = numArg(fname, args[1])
+                if (a != kotlin.math.floor(a) || b != kotlin.math.floor(b))
+                    throw NcodeError("в `случайно` границы целые")
+                if (kotlin.math.abs(a) > 1e9 || kotlin.math.abs(b) > 1e9)
+                    throw NcodeError("в `случайно` границы поменьше")
+                val from = a.toInt()
+                val to = b.toInt()
+                if (from > to) throw NcodeError("в `случайно` первое число меньше второго")
+                return kotlin.random.Random.nextInt(from, to + 1).toString()
+            }
+            "корень" -> {
+                val x = numArg(fname, args[0])
+                if (x < 0) throw NcodeError("корень из отрицательного — нельзя")
+                return fmtNum(kotlin.math.sqrt(x))
+            }
+            "модуль" -> {
+                return fmtNum(kotlin.math.abs(numArg(fname, args[0])))
+            }
+            "округлить" -> {
+                return fmtNum(kotlin.math.floor(numArg(fname, args[0]) + 0.5))
+            }
+            "степень" -> {
+                return fmtNum(Math.pow(numArg(fname, args[0]), numArg(fname, args[1])))
+            }
+            "минимум" -> {
+                val a = numArg(fname, args[0])
+                val c = numArg(fname, args[1])
+                return fmtNum(if (a <= c) a else c)
+            }
+            "максимум" -> {
+                val a = numArg(fname, args[0])
+                val c = numArg(fname, args[1])
+                return fmtNum(if (a >= c) a else c)
+            }
+            "длина" -> {
+                return resolveToken(args[0]).length.toString()
+            }
+            else -> throw NcodeError("не знаю формулу `$fname`")
+        }
     }
 }
 
@@ -1074,7 +1251,7 @@ private fun enableUtf8Console() {
 }
 
 private val HELP = """
-    Ncode v0.10 — русский мини-язык (.ncode, UTF-8)
+    Ncode 1.1 — русский мини-язык (.ncode, UTF-8)
     Использование:
       Ncode программа.ncode   — выполнить файл
       Ncode -help             — эта справка
@@ -1105,6 +1282,8 @@ private val HELP = """
         как только 2 плюс 2 равно 4 то вывести сработало конец
     Знаки — то же словами: + плюс, - минус, * умножить, / разделить, % остаток,
       = и == равно, != неравно, > больше, < меньше, >= <=, && и, || или
+    Формулы (везде, где значение): случайно 1 5, корень 9, модуль -5,
+      округлить 3.7, степень 2 10, минимум 3 7, максимум 3 7, длина "слово"
     Выражения: .. > умножить/разделить/остаток > плюс/минус > сравнение > и > или
     Выражения: .. (склейка) > сравнение > и > или
       сравнения: равно/равняется, неравно/неравняется, больше, меньше,
