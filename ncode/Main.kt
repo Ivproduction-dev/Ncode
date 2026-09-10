@@ -1,4 +1,48 @@
-class NcodeInterpreter {
+package ncode
+
+class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
+    override fun keyDown(cands: Set<String>) {
+        synchronized(keyQueue) {
+            heldKeys.addAll(cands)
+            keyQueue.add(KeyEv(cands))
+        }
+    }
+    override fun keyPress(cands: Set<String>) {
+        synchronized(keyQueue) {
+            keyQueue.add(KeyEv(cands))
+        }
+    }
+    override fun keyUp(cands: Set<String>) {
+        synchronized(keyQueue) {
+            heldKeys.removeAll(cands)
+        }
+        synchronized(keyUpQueue) {
+            keyUpQueue.add(KeyEv(cands))
+        }
+    }
+    override fun focusLost() {
+        synchronized(keyQueue) {
+            heldKeys.clear()
+        }
+    }
+    override fun mouseDown(x: Double, y: Double) {
+        synchronized(mouseQueue) {
+            mouseDown = true
+            mouseQueue.add(MouseEv(x, y, 0))
+        }
+    }
+    override fun mouseUp(x: Double, y: Double) {
+        synchronized(mouseQueue) {
+            mouseDown = false
+            mouseQueue.add(MouseEv(x, y, 1))
+        }
+    }
+    override fun mouseMove(x: Double, y: Double) {
+        synchronized(mouseQueue) {
+            mouseQueue.add(MouseEv(x, y, 2))
+        }
+    }
+
     private val vars = mutableMapOf<String, String>()
     private val lists = mutableMapOf<String, MutableList<String>>()
     private var execFailed = false
@@ -9,14 +53,14 @@ class NcodeInterpreter {
 
     private fun reportError(lineNo: Int, msg: String?) {
         val text = msg ?: "ошибка"
-        if (dryRun) System.err.println(checkLabel + ":" + lineNo + ": " + text)
-        else System.err.println("Ошибка в строке " + lineNo + ": " + text)
+        if (dryRun) platform.console.printErr(checkLabel + ":" + lineNo + ": " + text)
+        else platform.console.printErr("Ошибка в строке " + lineNo + ": " + text)
     }
 
     private fun warnCycle() {
         if (warnedCycle) return
         warnedCycle = true
-        System.err.println("Варнинг: зацикливание есть")
+        platform.console.printErr("Варнинг: зацикливание есть")
     }
     private val nameRegex = Regex("^[а-яёА-ЯЁa-zA-Z_][а-яёА-ЯЁa-zA-Z0-9_]*$")
     private val numberRegex = Regex("^-?\\d+(\\.\\d+)?$")
@@ -76,8 +120,8 @@ class NcodeInterpreter {
                     i++
                 }
             } catch (e: NcodeError) {
-                if (dryRun) System.err.println(checkLabel + ":" + (base + i) + ": " + e.message)
-                else System.err.println("Ошибка в строке ${base + i}: ${e.message}  >> $rawLine")
+                if (dryRun) platform.console.printErr(checkLabel + ":" + (base + i) + ": " + e.message)
+                else platform.console.printErr("Ошибка в строке ${base + i}: ${e.message}  >> $rawLine")
                 hadError = true
                 i = if (startsKw(line, "если", "эсли", "повтори", "повторить", "повторять", "пока", "покуда", "повторяй", "всегда") || startsKakTolko(line)) {
                     try { collectIf(lines, i).second } catch (e2: NcodeError) { lines.size }
@@ -94,18 +138,33 @@ class NcodeInterpreter {
     private data class KeyHandler(val key: String, val lines: List<String>, val base: Int)
 
     private data class KeyEv(val cands: Set<String>)
-    private data class MouseEv(val x: Double, val y: Double)
+    private data class MouseEv(val x: Double, val y: Double, val kind: Int)
 
-    private data class MouseHandler(val target: String?, val lines: List<String>, val base: Int)
+    private data class MouseHandler(val target: String?, val lines: List<String>, val base: Int, val kind: Int)
+
+    private data class CloneHandler(val parent: String, val lines: List<String>, val base: Int)
+    private data class ProcHandler(val name: String, val lines: List<String>, val base: Int)
+    private data class TimerH(val countText: String, val unit: String, var intervalNs: Long, var next: Long, var ready: Boolean, val lines: List<String>, val base: Int)
+
+    private val cloneHandlers = mutableListOf<CloneHandler>()
+    private val procHandlers = mutableListOf<ProcHandler>()
+    private val timerHandlers = mutableListOf<TimerH>()
+    private val cloneCount = mutableMapOf<String, Int>()
+    private var procDepth = 0
 
     private val keyHandlers = mutableListOf<KeyHandler>()
+    private val keyUpHandlers = mutableListOf<KeyHandler>()
     private val mouseHandlers = mutableListOf<MouseHandler>()
     private val keyQueue = mutableListOf<KeyEv>()
+    private val keyUpQueue = mutableListOf<KeyEv>()
     private val mouseQueue = mutableListOf<MouseEv>()
+    private val heldKeys = mutableSetOf<String>()
+    private var mouseDown = false
 
     private val keyAliases = mapOf(
         "пробел" to "space",
         "ввод" to "enter",
+        "энтер" to "enter",
         "esc" to "escape",
         "эскейп" to "escape",
         "таб" to "tab",
@@ -121,25 +180,16 @@ class NcodeInterpreter {
         "вниз" to "down"
     )
 
-    private val ruToEnKeys = mapOf(
-        "ф" to "a", "и" to "b", "с" to "c", "в" to "d", "у" to "e", "а" to "f",
-        "п" to "g", "р" to "h", "ш" to "i", "о" to "j", "л" to "k", "д" to "l",
-        "ь" to "m", "т" to "n", "щ" to "o", "з" to "p", "й" to "q", "к" to "r",
-        "ы" to "s", "е" to "t", "г" to "u", "м" to "v", "ц" to "w", "ч" to "x",
-        "н" to "y", "я" to "z", "х" to "open_bracket", "ъ" to "close_bracket",
-        "ж" to "semicolon", "э" to "quote", "б" to "comma", "ю" to "period"
-    )
-
     private fun normKey(raw: String): String {
         val t = raw.trim().lowercase(java.util.Locale.ROOT)
         if (t.length == 1) {
             val c = t[0]
             if (c in 'a'..'z' || c in '0'..'9') return t
-            ruToEnKeys[t]?.let { return it }
+            ruKeys[t]?.let { return it }
             return t
         }
         keyAliases[t]?.let { return it }
-        ruToEnKeys[t]?.let { return it }
+        ruKeys[t]?.let { return it }
         return t.replace(" ", "_")
     }
 
@@ -156,23 +206,64 @@ class NcodeInterpreter {
         return parts[3]
     }
 
+    private fun keyUpHeader(t: String): String? {
+        val parts = t.trim().split(Regex("\\s+"))
+        if (parts.size != 4) return null
+        if (parts[0].lowercase(java.util.Locale.ROOT) != "когда") return null
+        val second = parts[1].lowercase(java.util.Locale.ROOT)
+        if (second != "отпущена" && second != "отпущен" && second != "отпущено") return null
+        if (parts[2].lowercase(java.util.Locale.ROOT) != "клавиша") return null
+        return parts[3]
+    }
+
+    private fun cloneHeader(t: String): String? {
+        val parts = t.trim().split(Regex("\\s+"))
+        if (parts.size != 4) return null
+        if (parts[0].lowercase(java.util.Locale.ROOT) != "когда") return null
+        if (parts[1].lowercase(java.util.Locale.ROOT) != "создан") return null
+        if (parts[2].lowercase(java.util.Locale.ROOT) != "клон") return null
+        return parts[3]
+    }
+
+    private fun procHeader(t: String): String? {
+        val parts = t.trim().split(Regex("\\s+"))
+        if (parts.size != 2) return null
+        if (parts[0].lowercase(java.util.Locale.ROOT) != "чтобы") return null
+        return parts[1]
+    }
+
+    private fun timerHeader(t: String): Boolean {
+        val parts = t.trim().split(Regex("\\s+"), limit = 2)
+        return parts[0].lowercase(java.util.Locale.ROOT) == "каждые"
+    }
+
     private fun mouseTarget(t: String): String? {
         val low = t.trim().lowercase(java.util.Locale.ROOT)
-        if (low == "при нажатии" || low == "при клике") return null
+        if (low == "при нажатии" || low == "при клике" || low == "при отпускании" || low == "при движении мыши" || low == "при движении") return null
         val parts = t.trim().split(Regex("\\s+"))
-        if (parts.size != 4) throw NcodeError("нужно: при нажатии на <имя>")
+        if (parts.size != 4) {
+            if (parts.size >= 2 && parts[1].lowercase(java.util.Locale.ROOT) == "отпускании") throw NcodeError("нужно: при отпускании на <имя>")
+            throw NcodeError("нужно: при нажатии на <имя>")
+        }
         return parts[3].lowercase(java.util.Locale.ROOT)
     }
 
-    private fun isMouseHeader(t: String): Boolean {
+    private fun mouseKind(t: String): Int {
         val low = t.trim().lowercase(java.util.Locale.ROOT)
-        if (low == "при нажатии" || low == "при клике") return true
+        if (low == "при нажатии" || low == "при клике") return 0
+        if (low == "при отпускании") return 1
+        if (low == "при движении мыши" || low == "при движении") return 2
         val parts = t.trim().split(Regex("\\s+"))
-        if (parts.size < 3) return false
-        if (parts[0].lowercase(java.util.Locale.ROOT) != "при") return false
+        if (parts.size < 3) return -1
+        if (parts[0].lowercase(java.util.Locale.ROOT) != "при") return -1
         val second = parts[1].lowercase(java.util.Locale.ROOT)
-        if (second != "нажатии" && second != "клике") return false
-        return parts[2].lowercase(java.util.Locale.ROOT) == "на"
+        if ((second == "нажатии" || second == "клике") && parts[2].lowercase(java.util.Locale.ROOT) == "на") return 0
+        if (second == "отпускании" && parts[2].lowercase(java.util.Locale.ROOT) == "на") return 1
+        return -1
+    }
+
+    private fun isMouseHeader(t: String): Boolean {
+        return mouseKind(t) >= 0
     }
 
     private fun mouseHeader(t: String): Boolean {
@@ -188,7 +279,7 @@ class NcodeInterpreter {
     private var broadcastDepth = 0
 
     private fun isHeader(t: String): Boolean {
-        return handlerMsg(t) != null || keyHeader(t) != null || mouseHeader(t)
+        return handlerMsg(t) != null || keyHeader(t) != null || keyUpHeader(t) != null || cloneHeader(t) != null || procHeader(t) != null || timerHeader(t) || mouseHeader(t)
     }
 
     private fun dropTailEnd(body: MutableList<String>) {
@@ -221,8 +312,70 @@ class NcodeInterpreter {
                 skips.add(start..i - 1)
                 continue
             }
+            val keyUp = keyUpHeader(t)
+            if (keyUp != null) {
+                val start = i
+                i++
+                val body = mutableListOf<String>()
+                while (i < lines.size && !isHeader(lines[i].trim())) {
+                    body.add(lines[i])
+                    i++
+                }
+                dropTailEnd(body)
+                keyUpHandlers.add(KeyHandler(normKey(keyUp), body, start + 2))
+                skips.add(start..i - 1)
+                continue
+            }
+            val clone = cloneHeader(t)
+            if (clone != null) {
+                val start = i
+                i++
+                val body = mutableListOf<String>()
+                while (i < lines.size && !isHeader(lines[i].trim())) {
+                    body.add(lines[i])
+                    i++
+                }
+                dropTailEnd(body)
+                cloneHandlers.add(CloneHandler(clone.lowercase(java.util.Locale.ROOT), body, start + 2))
+                skips.add(start..i - 1)
+                continue
+            }
+            val proc = procHeader(t)
+            if (proc != null) {
+                if (!nameRegex.matches(proc)) throw NcodeError("строка ${i + 1}: плохое имя `$proc`")
+                if (proc.lowercase(java.util.Locale.ROOT) in reserved) throw NcodeError("строка ${i + 1}: `$proc` — служебное слово")
+                val start = i
+                i++
+                val body = mutableListOf<String>()
+                while (i < lines.size && !isHeader(lines[i].trim())) {
+                    body.add(lines[i])
+                    i++
+                }
+                dropTailEnd(body)
+                procHandlers.add(ProcHandler(proc.lowercase(java.util.Locale.ROOT), body, start + 2))
+                skips.add(start..i - 1)
+                continue
+            }
+            if (timerHeader(t)) {
+                val start = i
+                val tail = t.trim().substring(6).trim()
+                if (tail.isEmpty()) throw NcodeError("строка ${i + 1}: нужно: каждые <число> <секунды|минуты|часы>")
+                i++
+                val body = mutableListOf<String>()
+                while (i < lines.size && !isHeader(lines[i].trim())) {
+                    body.add(lines[i])
+                    i++
+                }
+                dropTailEnd(body)
+                val cut = tail.indexOfLast { it.isWhitespace() }
+                if (cut < 0) throw NcodeError("строка ${i + 1}: нужно: каждые <число> <секунды|минуты|часы>")
+                timerHandlers.add(TimerH(tail.substring(0, cut).trim(), tail.substring(cut).trim(), 0, 0, false, body, start + 2))
+                skips.add(start..i - 1)
+                continue
+            }
             if (mouseHeader(t)) {
                 val start = i
+                val kind = mouseKind(t)
                 val target = try {
                     mouseTarget(t)
                 } catch (e: NcodeError) {
@@ -235,7 +388,7 @@ class NcodeInterpreter {
                     i++
                 }
                 dropTailEnd(body)
-                mouseHandlers.add(MouseHandler(target, body, start + 2))
+                mouseHandlers.add(MouseHandler(target, body, start + 2, kind))
                 skips.add(start..i - 1)
                 continue
             }
@@ -259,6 +412,11 @@ class NcodeInterpreter {
     fun loadHandlers(lines: List<String>): List<IntRange> {
         handlers.clear()
         keyHandlers.clear()
+        keyUpHandlers.clear()
+        cloneHandlers.clear()
+        procHandlers.clear()
+        timerHandlers.clear()
+        cloneCount.clear()
         mouseHandlers.clear()
         kakListeners.clear()
         return extractHandlers(lines)
@@ -326,25 +484,6 @@ class NcodeInterpreter {
         }
     }
 
-    private fun parseZapustitPath(line: String): String {
-        val low = line.lowercase()
-        val kw = when {
-            low == "запустить" || low.startsWith("запустить ") || low.startsWith("запустить\t") -> "запустить"
-            low == "выполнить" || low.startsWith("выполнить ") || low.startsWith("выполнить\t") -> "выполнить"
-            else -> throw NcodeError("неизвестная команда")
-        }
-        var rest = keywordTail(line, kw)
-        if (startsKw(rest, "скрипт")) rest = rest.trim().substring(6).trim()
-        if (rest.isEmpty()) throw NcodeError("нужно: запустить скрипт <путь>, пример: запустить скрипт images/игра.ncode")
-        return rest
-    }
-
-    private fun runZapustit(line: String) {
-        val rest = parseZapustitPath(line)
-        if (dryRun) resolveScriptFile(rest, currentScriptDir())
-        else runScriptFile(rest)
-    }
-
     private fun resolveScriptFile(rawPath: String, fromDir: java.io.File?): java.io.File {
         val given = java.io.File(rawPath)
         val file = when {
@@ -360,46 +499,6 @@ class NcodeInterpreter {
 
     private fun currentScriptDir(): java.io.File? {
         return scriptStack.lastOrNull()?.let { java.io.File(it).parentFile }
-    }
-
-    private fun runScriptFile(rawPath: String) {
-        val file = resolveScriptFile(rawPath, currentScriptDir())
-        if (!file.isFile) throw NcodeError("нет файла `$rawPath`")
-        val canon = try {
-            file.canonicalPath
-        } catch (e: Exception) {
-            throw NcodeError("плохой путь `$rawPath`")
-        }
-        if (canon in scriptStack || scriptStack.size >= 50) {
-            warnCycle()
-            return
-        }
-        val sub = try {
-            readNcodeLines(file)
-        } catch (e: Exception) {
-            throw NcodeError("не могу прочитать `$rawPath`")
-        }
-        val skips = try {
-            extractHandlers(sub)
-        } catch (e: NcodeError) {
-            throw NcodeError(e.message + " (в скрипте " + rawPath + ")")
-        }
-        scriptStack.add(canon)
-        try {
-            val f = gfxFrame
-            if (!dryRun && f != null && f.isDisplayable) {
-                synchronized(gfxLock) {
-                    gfxObjs.clear()
-                }
-                gfxPanel?.repaint()
-            }
-            if (runLines(sub, 1, skips) != 0) {
-                System.err.println("в скрипте $rawPath")
-                execFailed = true
-            }
-        } finally {
-            scriptStack.removeAt(scriptStack.size - 1)
-        }
     }
 
     private fun veshatRawMsg(line: String): String? {
@@ -432,53 +531,13 @@ class NcodeInterpreter {
                 if (depth == 0 && startsKw(t, "вещать")) {
                     val m = veshatRawMsg(t)
                     if (m != null && m.trim().lowercase(java.util.Locale.ROOT) == want) {
-                        System.err.println(relLabel(entry.canonicalPath) + ":" + (h.base + idx) + ": Варнинг: зацикливание есть")
+                        platform.console.printErr(relLabel(entry.canonicalPath) + ":" + (h.base + idx) + ": Варнинг: зацикливание есть")
                         warnedCycle = true
                         return
                     }
                 }
             }
         }
-        if (!warnedCycle) dfsCycle(entry, lines, mutableListOf(), mutableSetOf())
-    }
-
-    private fun dfsCycle(file: java.io.File, fromLines: List<String>, stack: MutableList<String>, visited: MutableSet<String>): Boolean {
-        if (stack.size >= 50) return false
-        for ((idx, raw) in fromLines.withIndex()) {
-            val t = raw.trim()
-            if (!startsKw(t, "запустить", "выполнить")) continue
-            val target = try {
-                parseZapustitPath(t)
-            } catch (e: NcodeError) {
-                continue
-            }
-            val resolved = try {
-                resolveScriptFile(target, file.parentFile)
-            } catch (e: NcodeError) {
-                continue
-            }
-            val canon = try {
-                resolved.canonicalPath
-            } catch (e: Exception) {
-                continue
-            }
-            if (canon in stack) {
-                System.err.println(relLabel(file.canonicalPath) + ":" + (idx + 1) + ": Варнинг: зацикливание есть")
-                warnedCycle = true
-                return true
-            }
-            if (canon in visited) continue
-            visited.add(canon)
-            val sub = try {
-                readNcodeLines(resolved)
-            } catch (e: Exception) {
-                continue
-            }
-            stack.add(canon)
-            if (dfsCycle(resolved, sub, stack, visited)) return true
-            stack.removeAt(stack.size - 1)
-        }
-        return false
     }
 
     private fun startsKakTolko(line: String): Boolean {
@@ -953,6 +1012,27 @@ class NcodeInterpreter {
         for (h in keyHandlers) {
             if (runLines(h.lines, h.base) != 0) code = 1
         }
+        for (h in keyUpHandlers) {
+            if (runLines(h.lines, h.base) != 0) code = 1
+        }
+        for (h in cloneHandlers) {
+            if (runLines(h.lines, h.base) != 0) code = 1
+        }
+        for (h in procHandlers) {
+            if (runLines(h.lines, h.base) != 0) code = 1
+        }
+        for (h in timerHandlers) {
+            try {
+                val v = evalExpression(h.countText)
+                if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
+                if (v.toDouble() * msMult(h.unit) <= 0) throw NcodeError("интервал больше нуля")
+            } catch (e: NcodeError) {
+                reportError(h.base, e.message)
+                code = 1
+                continue
+            }
+            if (runLines(h.lines, h.base) != 0) code = 1
+        }
         for (h in mouseHandlers) {
             if (runLines(h.lines, h.base) != 0) code = 1
         }
@@ -1007,6 +1087,61 @@ class NcodeInterpreter {
                 }
             }
         }
+        val ups = synchronized(keyUpQueue) {
+            val got = keyUpQueue.toList()
+            keyUpQueue.clear()
+            got
+        }
+        for (ev in ups) {
+            for (h in keyUpHandlers.toList()) {
+                if (keyMatches(h.key, ev)) {
+                    if (runLines(h.lines, h.base) != 0) execFailed = true
+                }
+            }
+        }
+        if (timerHandlers.isNotEmpty()) {
+            val now = platform.clock.nanoTime()
+            for (t in timerHandlers.toList()) {
+                if (!t.ready) {
+                    val v = try {
+                        evalExpression(t.countText)
+                    } catch (e: NcodeError) {
+                        reportError(t.base, e.message)
+                        execFailed = true
+                        timerHandlers.remove(t)
+                        continue
+                    }
+                    if (!numberRegex.matches(v)) {
+                        reportError(t.base, "тут нужно число, а тут `$v`")
+                        execFailed = true
+                        timerHandlers.remove(t)
+                        continue
+                    }
+                    val ms = try {
+                        v.toDouble() * msMult(t.unit)
+                    } catch (e: NcodeError) {
+                        reportError(t.base, e.message)
+                        execFailed = true
+                        timerHandlers.remove(t)
+                        continue
+                    }
+                    if (ms <= 0) {
+                        reportError(t.base, "интервал больше нуля")
+                        execFailed = true
+                        timerHandlers.remove(t)
+                        continue
+                    }
+                    t.intervalNs = (ms * 1_000_000).toLong()
+                    t.next = now + t.intervalNs
+                    t.ready = true
+                    continue
+                }
+                if (now >= t.next) {
+                    if (runLines(t.lines, t.base) != 0) execFailed = true
+                    t.next = platform.clock.nanoTime() + t.intervalNs
+                }
+            }
+        }
         val clicks = synchronized(mouseQueue) {
             val got = mouseQueue.toList()
             mouseQueue.clear()
@@ -1016,6 +1151,7 @@ class NcodeInterpreter {
             vars["мышьх"] = fmtNum(ev.x)
             vars["мышьу"] = fmtNum(ev.y)
             for (h in mouseHandlers.toList()) {
+                if (h.kind != ev.kind) continue
                 if (h.target == null || clickHits(h.target, ev.x, ev.y)) {
                     if (runLines(h.lines, h.base) != 0) execFailed = true
                 }
@@ -1037,14 +1173,72 @@ class NcodeInterpreter {
         val hh: Double
         val img = o.costumes.getOrNull(o.costume)
         if (img != null) {
-            val s = o.size / img.width.toDouble()
-            hw = img.width * s / 2.0
-            hh = img.height * s / 2.0
+            val s = o.size / img.w.toDouble()
+            hw = img.w * s / 2.0
+            hh = img.h * s / 2.0
         } else {
             hw = o.size / 2.0
             hh = o.size / 2.0
         }
+        if (o.circle && img == null && o.text == null) {
+            return lx * lx + ly * ly <= hw * hw
+        }
         return lx >= -hw && lx <= hw && ly >= -hh && ly <= hh
+    }
+
+    private fun objBox(name: String): DoubleArray? {
+        val o = synchronized(gfxLock) {
+            gfxObjs.find { it.name == name }?.copy()
+        } ?: return null
+        val img = o.costumes.getOrNull(o.costume)
+        val hw: Double
+        val hh: Double
+        if (img != null) {
+            val s = o.size / img.w.toDouble()
+            hw = img.w * s / 2.0
+            hh = img.h * s / 2.0
+        } else {
+            hw = o.size / 2.0
+            hh = o.size / 2.0
+        }
+        val rad = Math.toRadians(o.rot)
+        val cs = kotlin.math.abs(Math.cos(rad))
+        val sn = kotlin.math.abs(Math.sin(rad))
+        val ex = hw * cs + hh * sn
+        val ey = hw * sn + hh * cs
+        return doubleArrayOf(o.x - ex, o.x + ex, o.y - ey, o.y + ey)
+    }
+
+    private fun touches(a: String, b: String): Boolean {
+        val vis = synchronized(gfxLock) {
+            val oa = gfxObjs.find { it.name == a } ?: throw NcodeError("объект не нарисован")
+            val ob = gfxObjs.find { it.name == b } ?: throw NcodeError("объект не нарисован")
+            oa.visible && ob.visible
+        }
+        if (!vis) return false
+        val ba = objBox(a) ?: throw NcodeError("объект не нарисован")
+        val bb = objBox(b) ?: throw NcodeError("объект не нарисован")
+        return ba[0] <= bb[1] && bb[0] <= ba[1] && ba[2] <= bb[3] && bb[2] <= ba[3]
+    }
+
+    private fun touchesEdge(name: String): Boolean {
+        val vis = synchronized(gfxLock) {
+            (gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")).visible
+        }
+        if (!vis) return false
+        val b = objBox(name) ?: throw NcodeError("объект не нарисован")
+        return b[0] <= -gfxW / 2.0 || b[1] >= gfxW / 2.0 || b[2] <= -gfxH / 2.0 || b[3] >= gfxH / 2.0
+    }
+
+    private fun distObjs(a: String, b: String): Double {
+        val p = synchronized(gfxLock) {
+            val oa = gfxObjs.find { it.name == a } ?: throw NcodeError("объект не нарисован")
+            val ob = gfxObjs.find { it.name == b } ?: throw NcodeError("объект не нарисован")
+            doubleArrayOf(oa.x, oa.y, ob.x, ob.y)
+        }
+        val dx = p[0] - p[2]
+        val dy = p[1] - p[3]
+        return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
     private fun pollAndRun(cond: String, body: List<BlockItem>, condLine: Int) {
@@ -1505,6 +1699,32 @@ class NcodeInterpreter {
         list.removeAt(listIndex(list, parts[1]))
     }
 
+    private fun runPeremeshat(line: String) {
+        val rest = keywordTail(line, "перемешать список").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: перемешать список <имя>")
+        listByName(rest).shuffle()
+    }
+
+    private fun runSozdatPapku(line: String) {
+        val rest = keywordTail(line, "создать папку").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: создать папку <имя>")
+        if (rest.startsWith("/") || rest.startsWith("\\") || (rest.length >= 2 && rest[1] == ':') || rest.split('/', '\\').any { it == ".." }) throw NcodeError("плохая папка `$rest`")
+        if (dryRun) return
+        if (!platform.files.mkdirs("saves/" + rest)) throw NcodeError("не могу создать папку `$rest`")
+    }
+
+    private fun runUdalitFile(line: String) {
+        val rest = keywordTail(line, "удалить файл").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: удалить файл <путь>")
+        if (dryRun) {
+            if (!dryWritten.contains(rest) && !platform.files.isFile(rest)) throw NcodeError("нет файла `$rest`")
+            return
+        }
+        if (platform.files.isDir(rest)) throw NcodeError("это папка, а не файл `$rest`")
+        if (!platform.files.isFile(rest)) throw NcodeError("нет файла `$rest`")
+        if (!platform.files.delete(rest) || platform.files.exists(rest)) throw NcodeError("не могу удалить `$rest`")
+    }
+
     private fun runOchistitSpisok(line: String) {
         val name = keywordTail(line, "очистить список")
         if (name.isEmpty() || !nameRegex.matches(name)) throw NcodeError("нужно: очистить список <имя>")
@@ -1525,31 +1745,18 @@ class NcodeInterpreter {
             dryWritten.add(path)
             return
         }
-        val file = java.io.File(path)
-        try {
-            val parent = file.parentFile
-            if (parent != null) parent.mkdirs()
-            if (append) file.appendText(value + "\n", Charsets.UTF_8)
-            else file.writeText(value + "\n", Charsets.UTF_8)
-        } catch (e: Exception) {
-            throw NcodeError("не могу записать `$path`")
-        }
+        if (append) platform.files.appendText(path, value)
+        else platform.files.writeText(path, value)
     }
 
     private val dryWritten = mutableSetOf<String>()
 
     private fun readFileText(path: String): String {
-        val file = java.io.File(path)
-        if (!file.isFile) throw NcodeError("нет файла `$path`")
-        return try {
-            readNcodeLines(file).joinToString("\n")
-        } catch (e: Exception) {
-            throw NcodeError("не могу прочитать `$path`")
-        }
+        return platform.files.readText(path)
     }
 
     private fun readFileTextOrDry(path: String): String {
-        if (!dryRun || java.io.File(path).isFile) return readFileText(path)
+        if (!dryRun || platform.files.isFile(path)) return readFileText(path)
         if (dryWritten.contains(path)) return "1"
         throw NcodeError("нет файла `$path`")
     }
@@ -1564,9 +1771,13 @@ class NcodeInterpreter {
         var g: Int,
         var b: Int,
         var alpha: Int,
-        var costumes: MutableList<java.awt.image.BufferedImage>,
+        var costumes: MutableList<GfxImage>,
         var costume: Int,
         var visible: Boolean,
+        var circle: Boolean = false,
+        var text: String? = null,
+        var vel: Double = 0.0,
+        var lastMove: Long = 0,
         var penDown: Boolean = false,
         var penR: Int = 0,
         var penG: Int = 0,
@@ -1574,17 +1785,46 @@ class NcodeInterpreter {
         var penSize: Int = 1
     )
 
-    private data class PenLine(
-        val x1: Double,
-        val y1: Double,
-        val x2: Double,
-        val y2: Double,
-        val r: Int,
-        val g: Int,
-        val b: Int,
-        val size: Int
-    )
+    private var gfxEverOpened = false
+    private var gfxW = 800
+    private var gfxH = 600
+    private var bgR = 0
+    private var bgG = 0
+    private var bgB = 0
+    private val gfxObjs = mutableListOf<GObj>()
+    private val penLines = mutableListOf<PenSeg>()
+    private val gfxLock = Object()
+    private var lastDrawn: String? = null
+    @Volatile private var closeRequested = false
 
+    private fun requireWindow() {
+        if (!platform.gfx.isOpen()) throw NcodeError("сначала создать окно")
+    }
+
+    fun isWindowOpen(): Boolean {
+        return platform.gfx.isOpen()
+    }
+
+    private fun renderCurrent() {
+        if (dryRun || !platform.gfx.isOpen()) return
+        val snap: List<GObj>
+        val trails: List<PenSeg>
+        synchronized(gfxLock) {
+            snap = gfxObjs.map { it.copy() }
+            trails = penLines.toList()
+        }
+        platform.gfx.render(
+            GfxFrame(
+                bgR, bgG, bgB, trails,
+                snap.map {
+                    GfxObj(
+                        it.name, it.x, it.y, it.size, it.rot, it.r, it.g, it.b, it.alpha,
+                        it.costumes.toList(), it.costume, it.visible, it.circle, it.text
+                    )
+                }
+            )
+        )
+    }
     private data class RisSpec(
         val name: String?,
         val x: Double,
@@ -1598,75 +1838,11 @@ class NcodeInterpreter {
         val path: String?
     )
 
-    private var gfxFrame: javax.swing.JFrame? = null
-    private var gfxEverOpened = false
-    private var gfxPanel: javax.swing.JPanel? = null
-    private var gfxW = 800
-    private var gfxH = 600
-    private val gfxObjs = mutableListOf<GObj>()
-    private val penLines = mutableListOf<PenLine>()
-    private val gfxLock = Object()
-    private val gfxImages = mutableMapOf<String, java.awt.image.BufferedImage>()
-    private var lastDrawn: String? = null
-    @Volatile private var closeRequested = false
-
-    private fun requireWindow(): javax.swing.JFrame {
-        val f = gfxFrame
-        if (f == null || !f.isDisplayable) throw NcodeError("сначала создать окно")
-        return f
-    }
-
-    fun isWindowOpen(): Boolean {
-        val f = gfxFrame
-        return f != null && f.isDisplayable
-    }
-
     fun warnNoWindowForInput() {
         if (gfxEverOpened || warnedNoWindow) return
-        if (keyHandlers.isEmpty() && mouseHandlers.isEmpty()) return
+        if (keyHandlers.isEmpty() && keyUpHandlers.isEmpty() && mouseHandlers.isEmpty() && cloneHandlers.isEmpty() && timerHandlers.isEmpty()) return
         warnedNoWindow = true
-        System.err.println("Варнинг: обработчики клавиш/мыши без окна не сработают — сначала создать окно")
-    }
-
-    private fun paintScene(g: java.awt.Graphics2D) {
-        g.color = java.awt.Color.BLACK
-        g.fillRect(0, 0, gfxW, gfxH)
-        val trails: List<PenLine> = synchronized(gfxLock) { penLines.toList() }
-        for (t in trails) {
-            g.color = java.awt.Color(t.r, t.g, t.b)
-            g.stroke = java.awt.BasicStroke(t.size.toFloat())
-            g.drawLine(
-                (gfxW / 2.0 + t.x1).toInt(),
-                (gfxH / 2.0 - t.y1).toInt(),
-                (gfxW / 2.0 + t.x2).toInt(),
-                (gfxH / 2.0 - t.y2).toInt()
-            )
-        }
-        g.stroke = java.awt.BasicStroke(1f)
-        val snap: List<GObj> = synchronized(gfxLock) { gfxObjs.map { it.copy() } }
-        for (o in snap) {
-            if (!o.visible) continue
-            val cx = gfxW / 2.0 + o.x
-            val cy = gfxH / 2.0 - o.y
-            val savedT = g.transform
-            val savedC = g.composite
-            g.translate(cx, cy)
-            g.rotate(Math.toRadians(-o.rot))
-            g.composite = java.awt.AlphaComposite.getInstance(java.awt.AlphaComposite.SRC_OVER, (o.alpha / 100f).coerceIn(0f, 1f))
-            val img = o.costumes.getOrNull(o.costume)
-            if (img != null) {
-                val s = o.size / img.width.toDouble()
-                val w = (img.width * s).toInt()
-                val h = (img.height * s).toInt()
-                g.drawImage(img, -w / 2, -h / 2, w, h, null)
-            } else {
-                g.color = java.awt.Color(o.r, o.g, o.b)
-                val s = o.size.toInt()
-                g.fillRect(-s / 2, -s / 2, s, s)
-            }
-            g.transform = savedT
-            g.composite = savedC
-        }
+        platform.console.printErr("Варнинг: события без окна не сработают — сначала создать окно")
     }
 
     private fun evalPositiveInt(text: String, what: String): Int {
@@ -1690,83 +1866,18 @@ class NcodeInterpreter {
             if (parts.size > 2) title = evalExpression(parts.drop(2).joinToString(" "))
         }
         if (dryRun) return
-        val alive = gfxFrame
-        if (alive != null && alive.isDisplayable) throw NcodeError("окно уже есть — сначала закрыть окно")
         gfxW = w
         gfxH = h
-        try {
-            javax.swing.SwingUtilities.invokeAndWait {
-                val f = javax.swing.JFrame(title)
-                f.defaultCloseOperation = javax.swing.WindowConstants.DO_NOTHING_ON_CLOSE
-                f.addWindowListener(object : java.awt.event.WindowAdapter() {
-                    override fun windowClosing(e: java.awt.event.WindowEvent?) {
-                        closeRequested = true
-                        f.dispose()
-                    }
-                })
-                val panel = object : javax.swing.JPanel() {
-                    override fun paintComponent(gr: java.awt.Graphics) {
-                        super.paintComponent(gr)
-                        paintScene(gr as java.awt.Graphics2D)
-                    }
-                }
-                panel.preferredSize = java.awt.Dimension(w, h)
-                panel.isFocusable = true
-                panel.setFocusTraversalKeysEnabled(false)
-                f.contentPane.add(panel)
-                val keyAdapt = object : java.awt.event.KeyAdapter() {
-                    override fun keyPressed(e: java.awt.event.KeyEvent) {
-                        val code = java.awt.event.KeyEvent.getKeyText(e.keyCode).lowercase(java.util.Locale.ROOT).replace(" ", "_")
-                        val cands = mutableSetOf(code)
-                        val ch = e.keyChar
-                        if (ch != java.awt.event.KeyEvent.CHAR_UNDEFINED) {
-                            cands.add(ch.toString().lowercase(java.util.Locale.ROOT))
-                            ruToEnKeys[ch.toString().lowercase(java.util.Locale.ROOT)]?.let { cands.add(it) }
-                        }
-                        synchronized(keyQueue) {
-                            keyQueue.add(KeyEv(cands))
-                        }
-                    }
-                    override fun keyTyped(e: java.awt.event.KeyEvent) {
-                        val c = e.keyChar
-                        if (c == java.awt.event.KeyEvent.CHAR_UNDEFINED || c.isLetterOrDigit() || c == ' ') return
-                        synchronized(keyQueue) {
-                            keyQueue.add(KeyEv(setOf(c.toString().lowercase(java.util.Locale.ROOT))))
-                        }
-                    }
-                }
-                f.addKeyListener(keyAdapt)
-                panel.addKeyListener(keyAdapt)
-                panel.addMouseListener(object : java.awt.event.MouseAdapter() {
-                    override fun mousePressed(e: java.awt.event.MouseEvent) {
-                        panel.requestFocusInWindow()
-                        val wx = e.x - panel.width / 2.0
-                        val wy = panel.height / 2.0 - e.y
-                        synchronized(mouseQueue) {
-                            mouseQueue.add(MouseEv(wx, wy))
-                        }
-                    }
-                })
-                f.pack()
-                f.setLocationRelativeTo(null)
-                f.isVisible = true
-                f.toFront()
-                panel.requestFocusInWindow()
-                gfxFrame = f
-                gfxPanel = panel
-                gfxEverOpened = true
-            }
-        } catch (e: Exception) {
-            throw NcodeError("окно не открылось")
-        }
+        platform.gfx.openWindow(w, h, title, this) { closeRequested = true }
+        gfxEverOpened = true
+        renderCurrent()
     }
 
     private fun runZakrytOkno(line: String) {
         if (keywordTail(line, "закрыть окно").trim().isNotEmpty()) throw NcodeError("нужно: закрыть окно")
         if (dryRun) return
-        val f = gfxFrame
-        if (f == null || !f.isDisplayable) throw NcodeError("окна нет")
-        f.dispose()
+        if (!platform.gfx.isOpen()) throw NcodeError("окна нет")
+        platform.gfx.closeWindow()
         kotlin.system.exitProcess(0)
     }
 
@@ -1793,21 +1904,9 @@ class NcodeInterpreter {
         throw NcodeError("нужно: нарисовать <имя> x y")
     }
 
-    private fun loadImage(path: String): java.awt.image.BufferedImage {
-        val file = resolveScriptFile(path, currentScriptDir())
-        val canon = try {
-            file.canonicalPath
-        } catch (e: Exception) {
-            throw NcodeError("плохой путь `$path`")
-        }
-        gfxImages[canon]?.let { return it }
-        val img = try {
-            javax.imageio.ImageIO.read(file)
-        } catch (e: Exception) {
-            null
-        } ?: throw NcodeError("не картинка `$path`")
-        gfxImages[canon] = img
-        return img
+    private fun loadImage(path: String): GfxImage {
+        val base = currentScriptDir()?.path
+        return platform.assets.imageFor(path, base).second
     }
 
     private fun runRisovat(line: String) {
@@ -1819,7 +1918,7 @@ class NcodeInterpreter {
             val old = gfxObjs.find { it.name == key }
             if (old != null) {
                 if (old.penDown && (old.x != spec.x || old.y != spec.y)) {
-                    penLines.add(PenLine(old.x, old.y, spec.x, spec.y, old.penR, old.penG, old.penB, old.penSize))
+                    penLines.add(PenSeg(old.x, old.y, spec.x, spec.y, old.penR, old.penG, old.penB, old.penSize))
                 }
                 old.x = spec.x
                 old.y = spec.y
@@ -1828,7 +1927,7 @@ class NcodeInterpreter {
             }
             lastDrawn = key
         }
-        gfxPanel?.repaint()
+        renderCurrent()
     }
 
     private fun isObjectProp(line: String): Boolean {
@@ -1837,7 +1936,7 @@ class NcodeInterpreter {
         val a = toks[0].lowercase(java.util.Locale.ROOT)
         if (a != "задать" && a != "присвоить" && a != "сделать" && a != "изменить" && a != "поменять") return false
         val p = toks[1].lowercase(java.util.Locale.ROOT)
-        if (p != "прозрачность" && p != "размер" && p != "поворот" && p != "цвет" && p != "образ" && p != "костюм") return false
+        if (p != "прозрачность" && p != "размер" && p != "поворот" && p != "угол" && p != "цвет" && p != "образ" && p != "костюм" && p != "форма" && p != "слой" && p != "скорость") return false
         for (x in toks) if (x.lowercase(java.util.Locale.ROOT) == "объекту") return true
         return false
     }
@@ -1875,18 +1974,53 @@ class NcodeInterpreter {
                 o.costumes.clear()
                 o.costumes.add(img)
                 o.costume = 0
+                o.text = null
             }
-            gfxPanel?.repaint()
+            renderCurrent()
+            return
+        }
+        if (prop == "форма") {
+            val fb = splitPropTail(tail)
+            if (fb.second.size != 1) throw NcodeError("нужно: задать форму круг|квадрат объекту <имя>")
+            val shape = fb.first.joinToString(" ").trim().lowercase(java.util.Locale.ROOT)
+            if (shape != "круг" && shape != "квадрат") throw NcodeError("нужно: задать форму круг|квадрат объекту <имя>")
+            if (dryRun) return
+            requireWindow()
+            synchronized(gfxLock) {
+                val o = gfxObjs.find { it.name == fb.second[0].lowercase(java.util.Locale.ROOT) } ?: throw NcodeError("объект не нарисован")
+                o.circle = shape == "круг"
+            }
+            renderCurrent()
+            return
+        }
+        if (prop == "слой") {
+            val sb = splitPropTail(tail)
+            if (sb.second.size != 1) throw NcodeError("нужно: задать слой <число> объекту <имя>")
+            val vv = evalExpression(sb.first.joinToString(" "))
+            if (!numberRegex.matches(vv)) throw NcodeError("тут нужно число, а тут `$vv`")
+            val dd = vv.toDouble()
+            if (dd != kotlin.math.floor(dd) || dd < 0) throw NcodeError("слой — целое от нуля")
+            if (dryRun) return
+            requireWindow()
+            synchronized(gfxLock) {
+                val ix = gfxObjs.indexOfFirst { it.name == sb.second[0].lowercase(java.util.Locale.ROOT) }
+                if (ix < 0) throw NcodeError("объект не нарисован")
+                val o = gfxObjs.removeAt(ix)
+                if (dd.toInt() > gfxObjs.size) throw NcodeError("слои 0.." + gfxObjs.size)
+                gfxObjs.add(dd.toInt(), o)
+            }
+            renderCurrent()
             return
         }
         val (before, after) = splitPropTail(tail)
         if (after.size != 1) throw NcodeError("нужно: задать $prop объекту <имя>")
         val name = after[0].lowercase(java.util.Locale.ROOT)
         if (prop == "цвет") {
-            if (before.size != 3) throw NcodeError("нужно: задать цвет R G B объекту <имя>")
-            val r = evalArithOperand(before[0])
-            val g = evalArithOperand(before[1])
-            val b = evalArithOperand(before[2])
+            val named = if (before.size == 1) namedColor(before[0]) else null
+            if (before.size != 3 && named == null) throw NcodeError("нужно: задать цвет R G B объекту <имя> | задать цвет <имя цвета> объекту <имя>")
+            val r = if (named != null) named[0].toDouble() else evalArithOperand(before[0])
+            val g = if (named != null) named[1].toDouble() else evalArithOperand(before[1])
+            val b = if (named != null) named[2].toDouble() else evalArithOperand(before[2])
             for ((c, n) in listOf(r to "красный", g to "зелёный", b to "синий")) {
                 if (c != kotlin.math.floor(c) || c < 0 || c > 255) throw NcodeError(n + " — целое 0..255")
             }
@@ -1898,7 +2032,7 @@ class NcodeInterpreter {
                 o.g = g.toInt()
                 o.b = b.toInt()
             }
-            gfxPanel?.repaint()
+            renderCurrent()
             return
         }
         if (before.isEmpty()) throw NcodeError("нужно: задать $prop объекту <имя>")
@@ -1913,7 +2047,7 @@ class NcodeInterpreter {
                 val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
                 o.alpha = d.toInt()
             }
-            gfxPanel?.repaint()
+            renderCurrent()
             return
         }
         if (prop == "размер") {
@@ -1926,10 +2060,10 @@ class NcodeInterpreter {
                 val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
                 o.size = d
             }
-            gfxPanel?.repaint()
+            renderCurrent()
             return
         }
-        if (prop == "поворот") {
+        if (prop == "поворот" || prop == "угол") {
             if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
             if (dryRun) return
             requireWindow()
@@ -1937,7 +2071,18 @@ class NcodeInterpreter {
                 val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
                 o.rot = ((v.toDouble() % 360) + 360) % 360
             }
-            gfxPanel?.repaint()
+            renderCurrent()
+            return
+        }
+        if (prop == "скорость") {
+            if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
+            if (dryRun) return
+            requireWindow()
+            synchronized(gfxLock) {
+                val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+                o.vel = v.toDouble()
+                o.lastMove = platform.clock.nanoTime()
+            }
             return
         }
         throw NcodeError("неизвестная команда")
@@ -1947,17 +2092,99 @@ class NcodeInterpreter {
         return lastDrawn ?: throw NcodeError("нечего показать — сначала нарисовать")
     }
 
+    private fun msMult(unit: String): Double {
+        return when (unit.lowercase(java.util.Locale.ROOT)) {
+            "секунда", "секунды", "секунд", "секунду" -> 1_000.0
+            "минута", "минуты", "минут", "минуту" -> 60_000.0
+            "час", "часа", "часов" -> 3_600_000.0
+            else -> throw NcodeError(
+                "не знаю единицу `$unit` " +
+                "(можно: секунду/секунды/секунд, минуту/минуты/минут, час/часа/часов)"
+            )
+        }
+    }
+
+    private fun runKlon(line: String) {
+        val rest = keywordTail(line, "создать клон").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: создать клон <имя>")
+        val parent = rest.lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        val src = synchronized(gfxLock) {
+            gfxObjs.find { it.name == parent }?.copy()
+        } ?: throw NcodeError("объект не нарисован")
+        var nm: String
+        synchronized(gfxLock) {
+            var n = (cloneCount[parent] ?: 1) + 1
+            nm = parent + n
+            while (gfxObjs.any { it.name == nm }) {
+                n++
+                nm = parent + n
+            }
+            cloneCount[parent] = n
+            gfxObjs.add(GObj(nm, src.x, src.y, src.size, src.rot, src.r, src.g, src.b, src.alpha, src.costumes.toMutableList(), src.costume, src.visible, src.circle, src.text, src.vel, 0, false, src.penR, src.penG, src.penB, src.penSize))
+            lastDrawn = nm
+        }
+        renderCurrent()
+        if (procDepth >= 100) {
+            warnCycle()
+            return
+        }
+        procDepth++
+        try {
+            for (h in cloneHandlers.toList()) {
+                if (h.parent == parent) {
+                    if (runLines(h.lines, h.base) != 0) execFailed = true
+                }
+            }
+        } finally {
+            procDepth--
+        }
+    }
+
+    private fun runUdalit(line: String) {
+        val rest = keywordTail(line, "удалить").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: удалить <имя>")
+        val name = rest.lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val ix = gfxObjs.indexOfFirst { it.name == name }
+            if (ix < 0) throw NcodeError("объект не нарисован")
+            gfxObjs.removeAt(ix)
+            if (lastDrawn == name) lastDrawn = null
+        }
+        renderCurrent()
+    }
+
+    private fun runVyzvat(line: String) {
+        val rest = keywordTail(line, "вызвать").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: вызвать <имя>")
+        val name = rest.lowercase(java.util.Locale.ROOT)
+        val h = procHandlers.find { it.name == name } ?: throw NcodeError("нет процедуры `$rest` — сначала `чтобы $rest`")
+        if (procDepth >= 100) {
+            warnCycle()
+            return
+        }
+        procDepth++
+        try {
+            if (runLines(h.lines, h.base) != 0) execFailed = true
+        } finally {
+            procDepth--
+        }
+    }
+
     private fun runPokazat(line: String, keyword: String, show: Boolean) {
         val rest = keywordTail(line, keyword).trim()
         if (rest.isNotEmpty() && rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно одно имя")
-        val name = if (rest.isEmpty()) lastDrawnKey() else rest.lowercase(java.util.Locale.ROOT)
         if (dryRun) return
+        val name = if (rest.isEmpty()) lastDrawnKey() else rest.lowercase(java.util.Locale.ROOT)
         requireWindow()
         synchronized(gfxLock) {
             val live = gfxObjs.find { it.name == name }
             if (live != null) {
                 live.visible = show
-                gfxPanel?.repaint()
+                renderCurrent()
                 return
             }
         }
@@ -1970,8 +2197,58 @@ class NcodeInterpreter {
         requireWindow()
         synchronized(gfxLock) {
             gfxObjs.clear()
+            penLines.clear()
         }
-        gfxPanel?.repaint()
+        renderCurrent()
+    }
+
+    private fun isBg(line: String): Boolean {
+        val toks = line.trim().split(Regex("\\s+"))
+        if (toks.size < 2) return false
+        val a = toks[0].lowercase(java.util.Locale.ROOT)
+        if (a != "задать" && a != "присвоить" && a != "сделать" && a != "изменить" && a != "поменять") return false
+        return toks[1].lowercase(java.util.Locale.ROOT) == "фон"
+    }
+
+    private fun namedColor(w: String): IntArray? {
+        return when (w.lowercase(java.util.Locale.ROOT).replace("ё", "е")) {
+            "красный" -> intArrayOf(255, 0, 0)
+            "зеленый" -> intArrayOf(0, 255, 0)
+            "синий" -> intArrayOf(0, 0, 255)
+            "белый" -> intArrayOf(255, 255, 255)
+            "черный" -> intArrayOf(0, 0, 0)
+            "желтый" -> intArrayOf(255, 255, 0)
+            "оранжевый" -> intArrayOf(255, 165, 0)
+            "фиолетовый" -> intArrayOf(128, 0, 128)
+            "розовый" -> intArrayOf(255, 192, 203)
+            "серый" -> intArrayOf(128, 128, 128)
+            "голубой" -> intArrayOf(0, 255, 255)
+            else -> null
+        }
+    }
+
+    private fun runBg(line: String) {
+        val t = line.trim()
+        var j = 0
+        while (j < t.length && (t[j].isLetterOrDigit() || t[j] == '_')) j++
+        val toks = t.substring(j).trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if ((toks.size != 4 && toks.size != 2) || toks[0].lowercase(java.util.Locale.ROOT) != "фон") throw NcodeError("нужно: задать фон R G B | задать фон <цвет>")
+        val named = if (toks.size == 2) namedColor(toks[1]) else null
+        if (toks.size == 2 && named == null) throw NcodeError("не знаю цвет `" + toks[1] + "`")
+        val r = if (named != null) named[0].toDouble() else evalArithOperand(toks[1])
+        val g = if (named != null) named[1].toDouble() else evalArithOperand(toks[2])
+        val b = if (named != null) named[2].toDouble() else evalArithOperand(toks[3])
+        for ((c, n) in listOf(r to "красный", g to "зелёный", b to "синий")) {
+            if (c != kotlin.math.floor(c) || c < 0 || c > 255) throw NcodeError(n + " — целое 0..255")
+        }
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            bgR = r.toInt()
+            bgG = g.toInt()
+            bgB = b.toInt()
+        }
+        renderCurrent()
     }
 
     private fun splitObjEnd(rest: String): Pair<String, String?> {
@@ -1985,6 +2262,64 @@ class NcodeInterpreter {
 
     private fun movingObjectKey(): String {
         return lastDrawn ?: throw NcodeError("нечего двигать — сначала нарисовать")
+    }
+
+    private fun runDvigat(line: String) {
+        val rest = keywordTail(line, "двигать").trim()
+        var obj: String? = null
+        if (rest.isNotEmpty()) {
+            val split = splitObjEnd(rest)
+            if (split.first.isNotEmpty() || split.second == null) throw NcodeError("нужно: двигать [объекту <имя>]")
+            obj = split.second
+        }
+        if (dryRun) return
+        requireWindow()
+        val key = obj ?: movingObjectKey()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == key } ?: throw NcodeError("объект не нарисован")
+            val now = platform.clock.nanoTime()
+            var dt = (now - o.lastMove).toDouble() / 1_000_000_000.0
+            o.lastMove = now
+            if (dt < 0) dt = 0.0
+            if (dt > 1.0) dt = 1.0
+            val steps = o.vel * dt
+            if (steps != 0.0) {
+                val rad = Math.toRadians(o.rot)
+                val nx = o.x + steps * Math.cos(rad)
+                val ny = o.y + steps * Math.sin(rad)
+                if (o.penDown && (nx != o.x || ny != o.y)) {
+                    penLines.add(PenSeg(o.x, o.y, nx, ny, o.penR, o.penG, o.penB, o.penSize))
+                }
+                o.x = nx
+                o.y = ny
+            }
+        }
+        renderCurrent()
+    }
+
+    private fun runOtskochit(line: String) {
+        val rest = keywordTail(line, "отскочить от края").trim()
+        var obj: String? = null
+        if (rest.isNotEmpty()) {
+            val split = splitObjEnd(rest)
+            if (split.first.isNotEmpty() || split.second == null) throw NcodeError("нужно: отскочить от края [объекту <имя>]")
+            obj = split.second
+        }
+        if (dryRun) return
+        requireWindow()
+        val key = obj ?: movingObjectKey()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == key } ?: throw NcodeError("объект не нарисован")
+            val b = objBox(key) ?: throw NcodeError("объект не нарисован")
+            val hitX = b[0] <= -gfxW / 2.0 || b[1] >= gfxW / 2.0
+            val hitY = b[2] <= -gfxH / 2.0 || b[3] >= gfxH / 2.0
+            if (!hitX && !hitY) return
+            var rot = o.rot
+            if (hitX) rot = 180.0 - rot
+            if (hitY) rot = -rot
+            o.rot = ((rot % 360) + 360) % 360
+        }
+        renderCurrent()
     }
 
     private fun runIdti(line: String) {
@@ -2012,12 +2347,12 @@ class NcodeInterpreter {
             val nx = o.x + steps * Math.cos(rad)
             val ny = o.y + steps * Math.sin(rad)
             if (o.penDown && (nx != o.x || ny != o.y)) {
-                penLines.add(PenLine(o.x, o.y, nx, ny, o.penR, o.penG, o.penB, o.penSize))
+                penLines.add(PenSeg(o.x, o.y, nx, ny, o.penR, o.penG, o.penB, o.penSize))
             }
             o.x = nx
             o.y = ny
         }
-        gfxPanel?.repaint()
+        renderCurrent()
     }
 
     private fun runPovernut(line: String) {
@@ -2047,7 +2382,7 @@ class NcodeInterpreter {
             val next = if (dir == "налево") o.rot + v.toDouble() else o.rot - v.toDouble()
             o.rot = ((next % 360) + 360) % 360
         }
-        gfxPanel?.repaint()
+        renderCurrent()
     }
 
     private fun runPlyt(line: String) {
@@ -2091,21 +2426,21 @@ class NcodeInterpreter {
                 val nx = obj.x + dx
                 val ny = obj.y + dy
                 if (obj.penDown && (nx != obj.x || ny != obj.y)) {
-                    penLines.add(PenLine(obj.x, obj.y, nx, ny, obj.penR, obj.penG, obj.penB, obj.penSize))
+                    penLines.add(PenSeg(obj.x, obj.y, nx, ny, obj.penR, obj.penG, obj.penB, obj.penSize))
                 }
                 obj.x = nx
                 obj.y = ny
             }
-            gfxPanel?.repaint()
+            renderCurrent()
             try {
-                Thread.sleep(sleepMs)
+                platform.clock.sleepMs(sleepMs)
             } catch (e: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw NcodeError("ожидание прервано")
             }
             checkEvents()
         }
-        gfxPanel?.repaint()
+        renderCurrent()
     }
 
     private fun runPenDown(line: String, down: Boolean) {
@@ -2128,14 +2463,21 @@ class NcodeInterpreter {
         val tail = all.drop(2)
         var rgb: List<String>
         var obj: String? = null
-        if (tail.size == 3) rgb = tail
+        if (tail.size == 3 && tail[1].lowercase(java.util.Locale.ROOT) == "объекту") {
+            rgb = listOf(tail[0])
+            obj = tail[2].lowercase(java.util.Locale.ROOT)
+        }
+        else if (tail.size == 3) rgb = tail
+        else if (tail.size == 1) rgb = tail
         else if (tail.size == 5 && tail[3].lowercase(java.util.Locale.ROOT) == "объекту") {
             rgb = tail.take(3)
             obj = tail[4].lowercase(java.util.Locale.ROOT)
-        } else throw NcodeError("нужно: цвет пера R G B [объекту <имя>]")
-        val r = evalArithOperand(rgb[0])
-        val g = evalArithOperand(rgb[1])
-        val b = evalArithOperand(rgb[2])
+        } else throw NcodeError("нужно: цвет пера R G B [объекту <имя>] | цвет пера <имя цвета> [объекту <имя>]")
+        val named = if (rgb.size == 1) namedColor(rgb[0]) else null
+        if (rgb.size == 1 && named == null) throw NcodeError("не знаю цвет `" + rgb[0] + "`")
+        val r = if (named != null) named[0].toDouble() else evalArithOperand(rgb[0])
+        val g = if (named != null) named[1].toDouble() else evalArithOperand(rgb[1])
+        val b = if (named != null) named[2].toDouble() else evalArithOperand(rgb[2])
         for ((c, n) in listOf(r to "красный", g to "зелёный", b to "синий")) {
             if (c != kotlin.math.floor(c) || c < 0 || c > 255) throw NcodeError(n + " — целое 0..255")
         }
@@ -2191,24 +2533,24 @@ class NcodeInterpreter {
             val o = gfxObjs.find { it.name == key } ?: throw NcodeError("объект не нарисован")
             o.costumes.add(img)
         }
-        gfxPanel?.repaint()
+        renderCurrent()
     }
 
-    private fun runSleduyushiy(line: String) {
+    private fun runSleduyushiy(line: String, keyword: String, step: Int) {
         val toks = line.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         var obj: String? = null
         if (toks.size == 2) obj = null
         else if (toks.size == 4 && toks[2].lowercase(java.util.Locale.ROOT) == "объекту") obj = toks[3].lowercase(java.util.Locale.ROOT)
-        else throw NcodeError("нужно: следующий костюм [объекту <имя>]")
+        else throw NcodeError("нужно: $keyword [объекту <имя>]")
         if (dryRun) return
         requireWindow()
         val key = obj ?: movingObjectKey()
         synchronized(gfxLock) {
             val o = gfxObjs.find { it.name == key } ?: throw NcodeError("объект не нарисован")
             if (o.costumes.isEmpty()) throw NcodeError("нет костюмов")
-            o.costume = (o.costume + 1) % o.costumes.size
+            o.costume = (o.costume + step + o.costumes.size) % o.costumes.size
         }
-        gfxPanel?.repaint()
+        renderCurrent()
     }
 
     private fun runKostyum(line: String) {
@@ -2230,7 +2572,256 @@ class NcodeInterpreter {
             if (d != kotlin.math.floor(d) || d < 1 || d > o.costumes.size) throw NcodeError("костюмы 1.." + o.costumes.size)
             o.costume = d.toInt() - 1
         }
-        gfxPanel?.repaint()
+        renderCurrent()
+    }
+
+    private data class SndPlay(val line: NcodeSoundLine, val thread: Thread, @Volatile var alive: Boolean, @Volatile var pos: Int = 0, val fmt: SndPcm? = null, val data: ByteArray? = null)
+    private val sndLock = Object()
+    private val sndActive = mutableMapOf<String, MutableList<SndPlay>>()
+    private val sndPaused = mutableMapOf<String, Pair<SndPcm, Int>>()
+    private val sndVol = mutableMapOf<String, Int>()
+    private val sndExts = setOf("mp3", "wav", "m4a", "ogg")
+
+    private fun sndExt(path: String): String {
+        val dot = path.lastIndexOf('.')
+        if (dot < 0) throw NcodeError("нужно: звук .mp3 .wav .m4a .ogg")
+        val e = path.substring(dot + 1).lowercase(java.util.Locale.ROOT)
+        if (e !in sndExts) throw NcodeError("нужно: звук .mp3 .wav .m4a .ogg")
+        return e
+    }
+
+    private fun sndCanon(path: String): String {
+        return platform.files.realPath(resolveScriptFile(path, currentScriptDir()).path)
+    }
+
+    private fun sndStart(canon: String, pcm: SndPcm, wait: Boolean, from: Int = 0) {
+        val data = pcm.bytes
+        val line = platform.sound.openLine(pcm.rate, pcm.channels)
+        line.setVolume(synchronized(sndLock) { sndVol[canon] ?: 100 })
+        val holder = arrayOfNulls<SndPlay>(1)
+        val th = Thread {
+            try {
+                line.start()
+                var off = from
+                while (off < data.size) {
+                    val h = holder[0] ?: break
+                    if (!h.alive) break
+                    line.write(data, off, minOf(8192, data.size - off))
+                    off += 8192
+                    h.pos = off
+                }
+                line.drain()
+            } catch (e: Exception) {
+            } finally {
+                try { line.stop() } catch (e: Exception) {}
+                try { line.close() } catch (e: Exception) {}
+                synchronized(sndLock) {
+                    val l = sndActive[canon]
+                    if (l != null) {
+                        l.remove(holder[0])
+                        if (l.isEmpty()) sndActive.remove(canon)
+                    }
+                }
+                holder[0]?.alive = false
+            }
+        }
+        th.isDaemon = true
+        val p = SndPlay(line, th, true, from, pcm, data)
+        holder[0] = p
+        synchronized(sndLock) {
+            sndActive.getOrPut(canon) { mutableListOf() }.add(p)
+        }
+        th.start()
+        if (wait) {
+            while (p.alive) {
+                if (closeRequested) {
+                    sndStop(canon)
+                    throw SceneStop()
+                }
+                try {
+                    platform.clock.sleepMs(50)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    sndStop(canon)
+                    throw NcodeError("ожидание прервано")
+                }
+                checkEvents()
+            }
+        }
+    }
+
+    private fun runPauza(line: String, keyword: String) {
+        val rest = keywordTail(line, keyword).trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: пауза звук <путь>")
+        val path = rest
+        sndExt(path)
+        if (dryRun) {
+            resolveScriptFile(path, currentScriptDir())
+            return
+        }
+        val canon = sndCanon(path)
+        val ps = synchronized(sndLock) { (sndActive.remove(canon) ?: mutableListOf()).toList() }
+        if (ps.isEmpty()) return
+        for (p in ps) {
+            p.alive = false
+            try { p.line.stop() } catch (e: Exception) {}
+            try { p.line.close() } catch (e: Exception) {}
+        }
+        try { ps[0].thread.join(500) } catch (e: Exception) {}
+        val f = ps[0].fmt
+        if (f != null) {
+            synchronized(sndLock) {
+                sndPaused[canon] = f to minOf(ps[0].pos, f.bytes.size)
+            }
+        }
+    }
+
+    private fun runProdolzhit(line: String, keyword: String) {
+        val rest = keywordTail(line, keyword).trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: продолжить звук <путь>")
+        val path = rest
+        sndExt(path)
+        if (dryRun) {
+            resolveScriptFile(path, currentScriptDir())
+            return
+        }
+        val canon = sndCanon(path)
+        val st = synchronized(sndLock) { sndPaused.remove(canon) } ?: return
+        if (st.second >= st.first.bytes.size) return
+        sndStart(canon, st.first, false, st.second)
+    }
+
+    private fun sndStop(canon: String) {
+        val ps = synchronized(sndLock) {
+            (sndActive.remove(canon) ?: mutableListOf()).toList()
+        }
+        for (p in ps) {
+            p.alive = false
+            try { p.line.stop() } catch (e: Exception) {}
+            try { p.line.close() } catch (e: Exception) {}
+        }
+    }
+
+    private fun isZvuk(w: String): Boolean {
+        val l = w.lowercase(java.util.Locale.ROOT)
+        return l == "звук" || l == "музыку"
+    }
+
+    private fun isZvuka(w: String): Boolean {
+        val l = w.lowercase(java.util.Locale.ROOT)
+        return l == "звука" || l == "музыки"
+    }
+
+    private fun runIgrat(line: String, keyword: String) {
+        val toks = keywordTail(line, keyword).trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        var wait = false
+        var path = ""
+        if (toks.size == 2 && isZvuk(toks[0])) path = toks[1]
+        else if (toks.size == 4 && isZvuk(toks[0]) && toks[1].lowercase(java.util.Locale.ROOT) == "и" && toks[2].lowercase(java.util.Locale.ROOT) == "ждать") {
+            wait = true
+            path = toks[3]
+        } else throw NcodeError("нужно: играть звук <путь> | играть звук и ждать <путь>")
+        val ext = sndExt(path)
+        if (dryRun) {
+            resolveScriptFile(path, currentScriptDir())
+            return
+        }
+        val canon = sndCanon(path)
+        val dec = platform.sound.decodeFile(path, canon, ext)
+        sndStart(canon, dec, wait)
+    }
+
+    private fun runOstanovit(line: String, keyword: String) {
+        val rest = keywordTail(line, keyword).trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: остановить звук <путь>")
+        sndExt(rest)
+        if (dryRun) {
+            resolveScriptFile(rest, currentScriptDir())
+            return
+        }
+        sndStop(sndCanon(rest))
+    }
+
+    private fun isSoundVol(line: String): Boolean {
+        val toks = line.trim().split(Regex("\\s+"))
+        if (toks.size < 2) return false
+        val a = toks[0].lowercase(java.util.Locale.ROOT)
+        if (a != "задать" && a != "присвоить" && a != "сделать" && a != "изменить" && a != "поменять") return false
+        if (toks[1].lowercase(java.util.Locale.ROOT) != "громкость") return false
+        for (x in toks) if (x.lowercase(java.util.Locale.ROOT) == "для") return true
+        return false
+    }
+
+    private fun runGromkost(line: String) {
+        val t0 = line.trim()
+        var i = 0
+        while (i < t0.length && (t0[i].isLetterOrDigit() || t0[i] == '_')) i++
+        val t = t0.substring(i).trim()
+        var j = 0
+        while (j < t.length && (t[j].isLetterOrDigit() || t[j] == '_')) j++
+        val tail = t.substring(j).trim()
+        val toks = tail.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        var didx = -1
+        for (q in toks.indices) if (toks[q].lowercase(java.util.Locale.ROOT) == "для") didx = q
+        if (didx < 0) throw NcodeError("нужно: задать громкость <число> для звука <путь>")
+        val after = toks.drop(didx + 1)
+        if (after.size != 2 || !isZvuka(after[0])) throw NcodeError("нужно: задать громкость <число> для звука <путь>")
+        val vexpr = toks.take(didx).joinToString(" ")
+        if (vexpr.isEmpty()) throw NcodeError("нужно: задать громкость <число> для звука <путь>")
+        val v = evalExpression(vexpr)
+        if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
+        val d = v.toDouble()
+        if (d != kotlin.math.floor(d) || d < 0 || d > 100) throw NcodeError("громкость — целое 0..100")
+        val path = after[1]
+        sndExt(path)
+        if (dryRun) {
+            resolveScriptFile(path, currentScriptDir())
+            return
+        }
+        val canon = sndCanon(path)
+        synchronized(sndLock) {
+            sndVol[canon] = d.toInt()
+        }
+        val ps = synchronized(sndLock) {
+            sndActive[canon]?.toList() ?: emptyList()
+        }
+        for (p in ps) p.line.setVolume(d.toInt())
+    }
+
+    private fun runVerh(line: String, keyword: String, front: Boolean) {
+        val rest = keywordTail(line, keyword).trim()
+        if (rest.isNotEmpty() && rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: $keyword [имя]")
+        if (dryRun) return
+        val name = if (rest.isEmpty()) lastDrawnKey() else rest.lowercase(java.util.Locale.ROOT)
+        requireWindow()
+        synchronized(gfxLock) {
+            val ix = gfxObjs.indexOfFirst { it.name == name }
+            if (ix < 0) throw NcodeError("объект не нарисован")
+            val o = gfxObjs.removeAt(ix)
+            if (front) gfxObjs.add(o) else gfxObjs.add(0, o)
+        }
+        renderCurrent()
+    }
+
+    private fun runNapisat(line: String, keyword: String) {
+        val rest = keywordTail(line, keyword).trim()
+        if (rest.isEmpty()) throw NcodeError("нужно: $keyword <имя> <текст>")
+        val cut = rest.indexOfFirst { it.isWhitespace() }
+        if (cut < 0) throw NcodeError("нужно: $keyword <имя> <текст>")
+        val name = rest.substring(0, cut).lowercase(java.util.Locale.ROOT)
+        val value = evalExpression(rest.substring(cut).trim())
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            if (value.isEmpty()) o.text = null
+            else {
+                o.text = value
+                o.costumes.clear()
+                o.costume = 0
+            }
+        }
+        renderCurrent()
     }
 
     private fun runLine(line: String) {
@@ -2238,6 +2829,10 @@ class NcodeInterpreter {
         when {
             isObjectProp(line) ->
                 runObjectProp(line)
+            isSoundVol(line) ->
+                runGromkost(line)
+            isBg(line) ->
+                runBg(line)
             low == "задать" || low.startsWith("задать ") || low.startsWith("задать\t") ->
                 runZadat(line)
             isPrintCommand(low) ->
@@ -2254,20 +2849,20 @@ class NcodeInterpreter {
                 runVeshat(line)
             low == "создать список" || low.startsWith("создать список ") || low.startsWith("создать список\t") ->
                 runSozdatSpisok(line)
+            low == "создать папку" || low.startsWith("создать папку ") || low.startsWith("создать папку\t") ->
+                runSozdatPapku(line)
             low == "добавить в список" || low.startsWith("добавить в список ") || low.startsWith("добавить в список\t") ->
                 runDobavit(line)
             low == "убрать из списка" || low.startsWith("убрать из списка ") || low.startsWith("убрать из списка\t") ->
                 runUbrat(line)
             low == "очистить список" || low.startsWith("очистить список ") || low.startsWith("очистить список\t") ->
                 runOchistitSpisok(line)
+            low == "перемешать список" || low.startsWith("перемешать список ") || low.startsWith("перемешать список\t") ->
+                runPeremeshat(line)
             low == "стоп" || low.startsWith("стоп ") || low.startsWith("стоп\t") ->
                 throw BreakSignal()
             low == "дальше" || low.startsWith("дальше ") || low.startsWith("дальше\t") ->
                 throw ContinueSignal()
-            low == "запустить" || low.startsWith("запустить ") || low.startsWith("запустить\t") ->
-                runZapustit(line)
-            low == "выполнить" || low.startsWith("выполнить ") || low.startsWith("выполнить\t") ->
-                runZapustit(line)
             low == "создать окно" || low.startsWith("создать окно ") || low.startsWith("создать окно\t") ->
                 runSozdatOkno(line, "создать окно")
             low == "открыть окно" || low.startsWith("открыть окно ") || low.startsWith("открыть окно\t") ->
@@ -2281,13 +2876,37 @@ class NcodeInterpreter {
             low == "показать" || low.startsWith("показать ") || low.startsWith("показать\t") ->
                 runPokazat(line, "показать", true)
             low == "спрятать" || low.startsWith("спрятать ") || low.startsWith("спрятать\t") ->
-                runPokazat(line, "спрятать", true)
+                runPokazat(line, "спрятать", false)
             low == "скрыть" || low.startsWith("скрыть ") || low.startsWith("скрыть\t") ->
                 runPokazat(line, "скрыть", false)
+            low == "наверх" || low.startsWith("наверх ") || low.startsWith("наверх\t") ->
+                runVerh(line, "наверх", true)
+            low == "выше" || low.startsWith("выше ") || low.startsWith("выше\t") ->
+                runVerh(line, "выше", true)
+            low == "вниз" || low.startsWith("вниз ") || low.startsWith("вниз\t") ->
+                runVerh(line, "вниз", false)
+            low == "ниже" || low.startsWith("ниже ") || low.startsWith("ниже\t") ->
+                runVerh(line, "ниже", false)
+            low == "написать" || low.startsWith("написать ") || low.startsWith("написать\t") ->
+                runNapisat(line, "написать")
+            low == "надпись" || low.startsWith("надпись ") || low.startsWith("надпись\t") ->
+                runNapisat(line, "надпись")
             low == "очистить" ->
                 runOchistit(line)
+            low == "создать клон" || low.startsWith("создать клон ") || low.startsWith("создать клон\t") ->
+                runKlon(line)
+            low == "удалить файл" || low.startsWith("удалить файл ") || low.startsWith("удалить файл\t") ->
+                runUdalitFile(line)
+            low == "удалить" || low.startsWith("удалить ") || low.startsWith("удалить\t") ->
+                runUdalit(line)
+            low == "вызвать" || low.startsWith("вызвать ") || low.startsWith("вызвать\t") ->
+                runVyzvat(line)
             low == "идти" || low.startsWith("идти ") || low.startsWith("идти\t") ->
                 runIdti(line)
+            low == "двигать" || low.startsWith("двигать ") || low.startsWith("двигать\t") ->
+                runDvigat(line)
+            low == "отскочить от края" || low.startsWith("отскочить от края ") || low.startsWith("отскочить от края\t") ->
+                runOtskochit(line)
             low == "повернуть" || low.startsWith("повернуть ") || low.startsWith("повернуть\t") ->
                 runPovernut(line)
             low == "плыть" || low.startsWith("плыть ") || low.startsWith("плыть\t") ->
@@ -2303,14 +2922,38 @@ class NcodeInterpreter {
             low == "добавить костюм" || low.startsWith("добавить костюм ") || low.startsWith("добавить костюм\t") ->
                 runDobavitKostyum(line)
             low == "следующий костюм" || low.startsWith("следующий костюм ") || low.startsWith("следующий костюм\t") ->
-                runSleduyushiy(line)
+                runSleduyushiy(line, "следующий костюм", 1)
+            low == "предыдущий костюм" || low.startsWith("предыдущий костюм ") || low.startsWith("предыдущий костюм\t") ->
+                runSleduyushiy(line, "предыдущий костюм", -1)
+            low == "прошлый костюм" || low.startsWith("прошлый костюм ") || low.startsWith("прошлый костюм\t") ->
+                runSleduyushiy(line, "прошлый костюм", -1)
             low == "костюм" || low.startsWith("костюм ") || low.startsWith("костюм\t") ->
                 runKostyum(line)
+            low == "играть" || low.startsWith("играть ") || low.startsWith("играть\t") ->
+                runIgrat(line, "играть")
+            low == "включить" || low.startsWith("включить ") || low.startsWith("включить\t") ->
+                runIgrat(line, "включить")
+            low == "остановить звук" || low.startsWith("остановить звук ") || low.startsWith("остановить звук\t") ->
+                runOstanovit(line, "остановить звук")
+            low == "остановить музыку" || low.startsWith("остановить музыку ") || low.startsWith("остановить музыку\t") ->
+                runOstanovit(line, "остановить музыку")
+            low == "выключить звук" || low.startsWith("выключить звук ") || low.startsWith("выключить звук\t") ->
+                runOstanovit(line, "выключить звук")
+            low == "выключить музыку" || low.startsWith("выключить музыку ") || low.startsWith("выключить музыку\t") ->
+                runOstanovit(line, "выключить музыку")
+            low == "пауза звук" || low.startsWith("пауза звук ") || low.startsWith("пауза звук\t") ->
+                runPauza(line, "пауза звук")
+            low == "пауза музыку" || low.startsWith("пауза музыку ") || low.startsWith("пауза музыку\t") ->
+                runPauza(line, "пауза музыку")
+            low == "продолжить звук" || low.startsWith("продолжить звук ") || low.startsWith("продолжить звук\t") ->
+                runProdolzhit(line, "продолжить звук")
+            low == "продолжить музыку" || low.startsWith("продолжить музыку ") || low.startsWith("продолжить музыку\t") ->
+                runProdolzhit(line, "продолжить музыку")
             low == "записать в файл" || low.startsWith("записать в файл ") || low.startsWith("записать в файл\t") ->
                 runZapisat(line, false)
             low == "добавить в файл" || low.startsWith("добавить в файл ") || low.startsWith("добавить в файл\t") ->
                 runZapisat(line, true)
-            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / запустить / создать окно / рисовать / показать / задать прозрачность / задать образ объекту / идти / при нажатии)")
+            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / создать окно / рисовать / показать / задать прозрачность / задать образ объекту / играть звук / остановить звук / задать громкость для звука / идти / написать / наверх / создать клон / вызвать / при нажатии)")
         }
     }
 
@@ -2356,7 +2999,7 @@ class NcodeInterpreter {
         val expr = trimmed.substring(keyword.length).trim()
         if (expr.isEmpty()) throw NcodeError("нужно: $keyword <что>")
         val out = evalExpression(expr)
-        if (!dryRun) println(out)
+        if (!dryRun) platform.console.printLine(out)
     }
 
     fun evalExpression(expr: String): String {
@@ -2371,9 +3014,37 @@ class NcodeInterpreter {
     private fun evalAnd(expr: String): String {
         splitByWordOp(expr, "и")?.let { parts ->
             if (parts.any { it.trim().isEmpty() }) throw NcodeError("у `и` пусто слева или справа")
-            return if (parts.all { toBool(evalComparison(it)) }) "истина" else "ложь"
+            return if (parts.all { toBool(evalNot(it)) }) "истина" else "ложь"
         }
-        return evalComparison(expr)
+        return evalNot(expr)
+    }
+
+    private val neLeadWords = setOf(
+        "истина", "да", "правда", "ложь", "нет", "неправда", "не",
+        "случайно", "корень", "модуль", "округлить", "степень",
+        "минимум", "максимум", "длина", "синус", "косинус", "время",
+        "сумма", "среднее", "взять", "есть", "найти", "заменить", "прочитать"
+    )
+
+    private fun evalNot(expr: String): String {
+        var t = expr.trim()
+        var neg = false
+        var ate = false
+        while (true) {
+            val m = Regex("^(не)(?=$|[\\s\".])").find(t.lowercase(java.util.Locale.ROOT)) ?: break
+            val rest = t.substring(m.range.last + 1).trim()
+            if (rest.isEmpty()) break
+            val head = rest.split(Regex("\\s+"), limit = 2)[0]
+            val hl = head.lowercase(java.util.Locale.ROOT)
+            if (hl !in neLeadWords && !numberRegex.matches(head) && !(head.length >= 2 && head.startsWith("\""))) break
+            neg = !neg
+            ate = true
+            t = rest
+        }
+        if (!ate) return evalComparison(expr)
+        val v = evalComparison(t)
+        if (!neg) return v
+        return if (toBool(v)) "ложь" else "истина"
     }
 
     private fun evalComparison(expr: String): String {
@@ -2393,6 +3064,12 @@ class NcodeInterpreter {
         val rest = keywordTail(line, "ждать")
         if (rest.isEmpty())
             throw NcodeError("нужно: ждать <число> <секунду|минуту|час>, пример: ждать 2 секунды")
+        val head = rest.trim().split(Regex("\\s+"), limit = 2)
+        val first = head[0].lowercase(java.util.Locale.ROOT)
+        if (first == "пока" || first == "покуда" || first == "до") {
+            runWaitPoka(if (head.size > 1) head[1].trim() else "")
+            return
+        }
         val cut = rest.trim().indexOfLast { it.isWhitespace() }
         if (cut < 0)
             throw NcodeError("нужно: ждать <число> <секунду|минуту|час>, пример: ждать 2 секунды")
@@ -2402,15 +3079,7 @@ class NcodeInterpreter {
         if (!numberRegex.matches(numVal)) throw NcodeError("`${numText}` — не число")
         val amount = numVal.toDouble()
         if (amount < 0) throw NcodeError("время не может быть отрицательным")
-        val mult = when (unit.lowercase(java.util.Locale.ROOT)) {
-            "секунда", "секунды", "секунд", "секунду" -> 1_000.0
-            "минута", "минуты", "минут", "минуту" -> 60_000.0
-            "час", "часа", "часов" -> 3_600_000.0
-            else -> throw NcodeError(
-                "не знаю единицу `$unit` " +
-                "(можно: секунду/секунды/секунд, минуту/минуты/минут, час/часа/часов)"
-            )
-        }
+        val mult = msMult(unit)
         val millis = amount * mult
         if (millis > 86_400_000.0) throw NcodeError("максимум — 24 часа")
         if (!dryRun) {
@@ -2419,7 +3088,7 @@ class NcodeInterpreter {
                 if (closeRequested) throw SceneStop()
                 val step = if (left > 50) 50 else left
                 try {
-                    Thread.sleep(step)
+                    platform.clock.sleepMs(step)
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw NcodeError("ожидание прервано")
@@ -2430,13 +3099,26 @@ class NcodeInterpreter {
         }
     }
 
-    private var stdin: java.io.BufferedReader? = null
+    private fun runWaitPoka(cond: String) {
+        if (cond.isEmpty()) throw NcodeError("нужно: ждать пока <условие>")
+        if (dryRun) {
+            toBool(evalExpression(cond))
+            return
+        }
+        while (!toBool(evalExpression(cond))) {
+            if (closeRequested) throw SceneStop()
+            try {
+                platform.clock.sleepMs(50)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw NcodeError("ожидание прервано")
+            }
+            checkEvents()
+        }
+    }
 
     private fun readStdinLine(): String? {
-        if (stdin == null) stdin = java.io.BufferedReader(
-            java.io.InputStreamReader(System.`in`, Charsets.UTF_8)
-        )
-        return stdin!!.readLine()
+        return platform.console.readLine()
     }
 
     private fun runAsk(line: String) {
@@ -2448,8 +3130,8 @@ class NcodeInterpreter {
         if (prompt.isNotEmpty()) {
             if (dryRun) evalConcat(prompt)
             else {
-                print(evalConcat(prompt) + " ")
-                System.out.flush()
+                platform.console.printText(evalConcat(prompt) + " ")
+                platform.console.flush()
             }
         }
         if (dryRun) {
@@ -2670,11 +3352,33 @@ class NcodeInterpreter {
     private fun fmtNum(d: Double): String {
         if (!d.isFinite()) throw NcodeError("не число вышло")
         val r = if (kotlin.math.abs(d) < 1e15) kotlin.math.round(d * 1e10) / 1e10 else d
-        return if (r == kotlin.math.floor(r) && kotlin.math.abs(r) < 9e18) r.toLong().toString() else r.toString()
+        if (r == kotlin.math.floor(r) && kotlin.math.abs(r) < 9e18) return r.toLong().toString()
+        return java.math.BigDecimal(r.toString()).toPlainString()
     }
 
     private fun evalConcat(expr: String): String {
-        val parts = expr.split("..")
+        val parts = mutableListOf<String>()
+        val cur = StringBuilder()
+        var inQ = false
+        var i = 0
+        while (i < expr.length) {
+            val c = expr[i]
+            if (c == '"') {
+                inQ = !inQ
+                cur.append(c)
+                i++
+                continue
+            }
+            if (!inQ && c == '.' && i + 1 < expr.length && expr[i + 1] == '.') {
+                parts.add(cur.toString())
+                cur.setLength(0)
+                i += 2
+                continue
+            }
+            cur.append(c)
+            i++
+        }
+        parts.add(cur.toString())
         if (parts.size == 1) return evalSingle(parts[0].trim(), single = true)
         return parts.joinToString("") { raw -> evalSingle(raw, single = false, rawFallback = raw) }
     }
@@ -2743,6 +3447,86 @@ class NcodeInterpreter {
         return t.isNotEmpty()
     }
 
+    private fun objProp(name: String, prop: String): String? {
+        if (dryRun) return when (prop) {
+            "икс", "игрек", "угол", "скорость" -> "0"
+            "размер", "прозрачность" -> "100"
+            "форма" -> "квадрат"
+            else -> "ложь"
+        }
+        val o = synchronized(gfxLock) {
+            gfxObjs.find { it.name == name }?.copy()
+        } ?: return null
+        return when (prop) {
+            "икс" -> fmtNum(o.x)
+            "игрек" -> fmtNum(o.y)
+            "размер" -> fmtNum(o.size)
+            "угол" -> fmtNum(o.rot)
+            "скорость" -> fmtNum(o.vel)
+            "виден" -> if (o.visible) "истина" else "ложь"
+            "форма" -> if (o.circle) "круг" else "квадрат"
+            else -> o.alpha.toString()
+        }
+    }
+
+    private fun svoKnown(prop: String): Boolean {
+        return prop == "х" || prop == "x" || prop == "у" || prop == "y" ||
+            prop == "прозрачность" || prop == "прозрачности" ||
+            prop == "размер" || prop == "размера" ||
+            prop == "ширина" || prop == "ширины" ||
+            prop == "высота" || prop == "высоты" ||
+            prop == "угол" || prop == "угла" ||
+            prop == "костюм" || prop == "костюма" ||
+            prop == "красный" || prop == "красного" ||
+            prop == "зеленый" || prop == "зеленого" ||
+            prop == "синий" || prop == "синего" ||
+            prop == "видимость" || prop == "видимости" || prop == "текст" || prop == "текста" ||
+            prop == "перо" || prop == "пера" || prop == "слой" || prop == "слоя" ||
+            prop == "форма" || prop == "формы" || prop == "скорость" || prop == "скорости"
+    }
+
+    private fun svoProp(name: String, prop: String): String {
+        if (dryRun) return when (prop) {
+            "х", "x", "у", "y", "угол", "угла", "слой", "слоя" -> "0"
+            "костюм", "костюма" -> "1"
+            "видимость", "видимости", "перо", "пера" -> "ложь"
+            "текст", "текста" -> ""
+            "скорость", "скорости" -> "0"
+            "форма", "формы" -> "квадрат"
+            else -> "100"
+        }
+        val o = synchronized(gfxLock) {
+            gfxObjs.find { it.name == name }?.copy()
+        } ?: throw NcodeError("объект не нарисован")
+        val img = o.costumes.getOrNull(o.costume)
+        val w = if (img != null) img.w * (o.size / img.w.toDouble()) else o.size
+        val h = if (img != null) img.h * (o.size / img.w.toDouble()) else o.size
+        return when (prop) {
+            "х", "x" -> fmtNum(o.x)
+            "у", "y" -> fmtNum(o.y)
+            "прозрачность", "прозрачности" -> o.alpha.toString()
+            "размер", "размера" -> fmtNum(o.size)
+            "ширина", "ширины" -> fmtNum(w)
+            "высота", "высоты" -> fmtNum(h)
+            "угол", "угла" -> fmtNum(o.rot)
+            "костюм", "костюма" -> (o.costume + 1).toString()
+            "красный", "красного" -> o.r.toString()
+            "зеленый", "зеленого" -> o.g.toString()
+            "синий", "синего" -> o.b.toString()
+            "видимость", "видимости" -> if (o.visible) "истина" else "ложь"
+            "скорость", "скорости" -> fmtNum(o.vel)
+            "форма", "формы" -> if (o.circle) "круг" else "квадрат"
+            "текст", "текста" -> o.text ?: ""
+            "перо", "пера" -> if (o.penDown) "истина" else "ложь"
+            else -> synchronized(gfxLock) { gfxObjs.indexOfFirst { it.name == name }.toString() }
+        }
+    }
+
+    private fun isEst(w: String): Boolean {
+        val l = w.lowercase(java.util.Locale.ROOT)
+        return l == "есть" || l == "эсть" || l == "ест" || l == "имеется"
+    }
+
     private fun evalSingle(trimmedInput: String, single: Boolean, rawFallback: String = trimmedInput): String {
         val t = trimmedInput.trim()
         if (t.isEmpty()) return rawFallback
@@ -2766,6 +3550,22 @@ class NcodeInterpreter {
         if (head0 == "длина" && toks.size >= 2 && toks[1].lowercase(java.util.Locale.ROOT) == "списка") {
             if (toks.size != 3) throw NcodeError("нужно: длина списка <имя>")
             return listByName(toks[2]).size.toString()
+        }
+        if (isEst(head0) && toks.size >= 3) {
+            var k = 1
+            if (toks[k].lowercase(java.util.Locale.ROOT) == "ли") k++
+            if (k + 1 < toks.size && toks[k].lowercase(java.util.Locale.ROOT) == "в" && toks[k + 1].lowercase(java.util.Locale.ROOT) == "списке") {
+                if (toks.size < k + 4) throw NcodeError("нужно: есть в списке <имя> <значение>")
+                val list = listByName(toks[k + 2])
+                val v = evalExpression(toks.drop(k + 3).joinToString(" ")).lowercase(java.util.Locale.ROOT)
+                return if (list.any { it.lowercase(java.util.Locale.ROOT) == v }) "истина" else "ложь"
+            }
+            if (k < toks.size && toks[k].lowercase(java.util.Locale.ROOT) == "файл") {
+                if (toks.size != k + 2) throw NcodeError("нужно: есть ли файл <путь>")
+                val path = toks[k + 1]
+                if (dryRun && dryWritten.contains(path)) return "истина"
+                return if (platform.files.isFile(path)) "истина" else "ложь"
+            }
         }
         if (head0 == "есть" && toks.size >= 4 &&
             toks[1].lowercase(java.util.Locale.ROOT) == "в" &&
@@ -2823,6 +3623,54 @@ class NcodeInterpreter {
             }
             return fmtNum(best.toDouble())
         }
+        if (head0 == "нажата" && (toks.size == 2 || (toks.size == 3 && (toks[1].lowercase(java.util.Locale.ROOT) == "клавиша" || (toks[1].lowercase(java.util.Locale.ROOT) == "кнопка" && (toks[2].lowercase(java.util.Locale.ROOT) == "мыши" || toks[2].lowercase(java.util.Locale.ROOT) == "мышь")))))) {
+            if (toks.size == 2 && (toks[1].lowercase(java.util.Locale.ROOT) == "мышь" || toks[1].lowercase(java.util.Locale.ROOT) == "кнопка")) {
+                if (dryRun) return "ложь"
+                return if (synchronized(mouseQueue) { mouseDown }) "истина" else "ложь"
+            }
+            if (toks.size == 3 && toks[1].lowercase(java.util.Locale.ROOT) == "кнопка") {
+                if (dryRun) return "ложь"
+                return if (synchronized(mouseQueue) { mouseDown }) "истина" else "ложь"
+            }
+            val key = if (toks.size == 2) toks[1] else toks[2]
+            if (dryRun) return "ложь"
+            val down = synchronized(keyQueue) { normKey(key) in heldKeys }
+            return if (down) "истина" else "ложь"
+        }
+        if (head0 == "касается" && toks.size == 3) {
+            if (dryRun) return "ложь"
+            val a = toks[1].lowercase(java.util.Locale.ROOT)
+            if (toks[2].lowercase(java.util.Locale.ROOT) == "край") {
+                return if (touchesEdge(a)) "истина" else "ложь"
+            }
+            val b = toks[2].lowercase(java.util.Locale.ROOT)
+            return if (touches(a, b)) "истина" else "ложь"
+        }
+        if (head0 == "расстояние" && toks.size == 3) {
+            if (dryRun) return "0"
+            val a = toks[1].lowercase(java.util.Locale.ROOT)
+            val b = toks[2].lowercase(java.util.Locale.ROOT)
+            return fmtNum(distObjs(a, b))
+        }
+        if (head0 == "свойство") {
+            if (toks.size == 4 && (toks[2].lowercase(java.util.Locale.ROOT) == "объекта" || toks[2].lowercase(java.util.Locale.ROOT) == "обьекта")) {
+                val prop = toks[1].lowercase(java.util.Locale.ROOT).replace("ё", "е")
+                if (!svoKnown(prop)) throw NcodeError("не знаю свойство `$prop`")
+                return svoProp(toks[3].lowercase(java.util.Locale.ROOT), prop)
+            }
+            if (toks.size >= 2 && (svoKnown(toks[1].lowercase(java.util.Locale.ROOT).replace("ё", "е")) || (toks.size >= 3 && (toks[2].lowercase(java.util.Locale.ROOT) == "объекта" || toks[2].lowercase(java.util.Locale.ROOT) == "обьекта")))) {
+                throw NcodeError("нужно: свойство <что> объекта <имя>")
+            }
+        }
+        if ((head0 == "икс" || head0 == "x" || head0 == "х" || head0 == "игрек" || head0 == "y" || head0 == "у" || head0 == "размер" || head0 == "угол" || head0 == "поворот" || head0 == "виден" || head0 == "прозрачность" || head0 == "форма" || head0 == "скорость") && toks.size == 2) {
+            val prop = when (head0) {
+                "x", "х" -> "икс"
+                "y", "у" -> "игрек"
+                "поворот" -> "угол"
+                else -> head0
+            }
+            objProp(toks[1].lowercase(java.util.Locale.ROOT), prop)?.let { return it }
+        }
         val arity = funcArity[toks[0].lowercase(java.util.Locale.ROOT)]
         if (arity != null) {
             val args = toks.drop(1)
@@ -2837,6 +3685,7 @@ class NcodeInterpreter {
         if (low in falseWords) return "ложь"
         if (low == "данные") return lastData
         if (!single && low == "пробел") return " "
+        if (!single && low == "точкаточка") return ".."
         if (numberRegex.matches(t)) return t
         return t
     }
@@ -2853,7 +3702,7 @@ class NcodeInterpreter {
         "косинус" to 1,
         "время" to 0
     )
-    private val startNanos = System.nanoTime()
+    private val startNanos = platform.clock.nanoTime()
 
     private fun textArg(tok: String): String {
         val t = tok.trim()
@@ -2937,7 +3786,7 @@ class NcodeInterpreter {
                 return fmtNum(kotlin.math.cos(Math.toRadians(numArg(fname, args[0]))))
             }
             "время" -> {
-                return fmtNum((System.nanoTime() - startNanos).toDouble() / 1e9)
+                return fmtNum((platform.clock.nanoTime() - startNanos).toDouble() / 1e9)
             }
             else -> throw NcodeError("не знаю формулу `$fname`")
         }
@@ -2949,192 +3798,12 @@ class BreakSignal : Exception()
 class ContinueSignal : Exception()
 class SceneStop : Exception()
 
-private fun enableUtf8Console() {
-    if (System.console() == null) return
-    if (!System.getProperty("os.name", "").lowercase().startsWith("windows")) return
-    try {
-        ProcessBuilder("cmd", "/c", "chcp 65001 >nul 2>&1").inheritIO().start().waitFor()
-    } catch (e: Exception) {
-    }
-}
-
-private val HELP = """
-    Ncode 2.1 — русский мини-язык (.ncode, UTF-8)
-    Использование:
-      Ncode программа.ncode   — выполнить файл (сначала молча проверяется)
-      Ncode -help             — эта справка
-      Ncode --проверить программа.ncode — проверить без запуска
-    Команды (регистр не важен, одна строка — одна команда):
-      задать <имя> <значение>              — создать или перезаписать переменную
-        задать какашка истина
-        задать какашка "иван"              — взять значение из переменной иван
-      изменить|поменять <имя> <значение>   — поменять СУЩЕСТВУЮЩУЮ переменную
-        изменить какашка ложь
-      напечатать|печатать|вывести <что>    — вывести текст, число или "переменную"
-        напечатать хеллоу ворлд
-        напечатать "иван" .. пробел .. "нептун"
-      если У то К (иначеесли У то К)* (иначе К)? конец
-        если "возраст" больше или равно 18 то вывести взрослый иначе вывести маленький конец
-      ждать <число> <единица>              — пауза: секунду/секунды/секунд,
-                                             минуту/минуты/минут, час/часа/часов
-        ждать 1 секунду
-        ждать 5 секунд
-      спросить <подсказка> сохранить в <имя> — строка с клавиатуры в переменную
-        спросить Как тебя зовут сохранить в имя
-        (формы: сохранить в, сохранить, сохр в, сохр; коротко: спросить имя)
-      повтори|повторить|повторять <число> раз — цикл, тело до `конец`
-        повтори 3 раза
-        напечатать привет
-        конец
-        (счёт: раз, раза, разов; можно из переменной: повтори "мало" раз)
-      как только <условие> то — событие: ждёт правды, выполняет тело раз
-        как только 2 плюс 2 равно 4 то вывести сработало конец
-      конец — закрывает блок; в одну строку можно не писать:
-        если да то вывести а
-      вещать всем <сообщение> — событие всем «когда будет получено»
-        вещать всем какашка
-      Когда будет получено <сообщение> — обработчик (конец не пишем)
-        когда будет получено какашка
-      запустить [скрипт] <путь> — выполнить другой файл (переменные общие)
-        запустить скрипт images/игра.ncode
-      пока <условие> — цикл пока правда, тело до `конец` (только блоком)
-      повторяй/всегда — бесконечно, тело до `конец`; стоп — выйти, дальше — дальше
-      создать список/добавить/взять/длина/убрать/очистить — списки с 1
-      записать/добавить/прочитать файл — файлы построчно
-      найти/заменить — строки; вещать X данные Y — данные в обработчик
-      создать окно/открыть окно, закрыть окно — окно 800×600 mygame
-      нарисовать <имя> x y, задать/изменить прозрачность/размер/поворот/цвет/образ объекту — сцена
-      идти/повернуть/плыть — движение; когда нажата клавиша/при нажатии — ввод
-    Знаки — то же словами: + плюс, - минус, * умножить, / разделить, % остаток,
-      = и == равно, != неравно, > больше, < меньше, >= <=, && и, || или
-    Формулы (везде, где значение): случайно 1 5, корень 9, модуль -5,
-      округлить 3.7, степень 2 10, минимум 3 7, максимум 3 7, длина "слово",
-      синус 90, косинус 0, время (секунды с запуска)
-    Выражения: .. > умножить/разделить/остаток > плюс/минус > сравнение > и > или
-      сравнения: равно/равняется, неравно/неравняется, больше, меньше,
-                 больше или равно/равняется, меньше или равно/равняется
-      правда: истина/да/правда; ложь: ложь/нет/неправда
-    Примеры: test.ncode, test2.ncode. Дока: NCODE_v0.1.md
-""".trimIndent()
-
-private fun readNcodeLines(file: java.io.File): List<String> {
-    val lines = file.readLines(Charsets.UTF_8)
-    if (lines.isEmpty()) return lines
-    val first = lines[0]
-    if (first.isEmpty() || first[0] != 65279.toChar()) return lines
-    return listOf(first.drop(1)) + lines.drop(1)
-}
-
-private fun safeCanon(f: java.io.File): String {
-    return try {
-        f.canonicalPath
-    } catch (e: Exception) {
-        f.path
-    }
-}
-
-private fun relLabel(path: String): String {
+fun relLabel(path: String): String {
     return try {
         val cwd = java.io.File(System.getProperty("user.dir")).canonicalFile.toPath()
         val rel = cwd.relativize(java.io.File(path).canonicalFile.toPath()).toString()
         if (rel.startsWith("..")) path else rel
     } catch (e: Exception) {
         path
-    }
-}
-
-fun main(args: Array<String>) {
-    System.setOut(java.io.PrintStream(java.io.BufferedOutputStream(java.io.FileOutputStream(java.io.FileDescriptor.out)), true, "UTF-8"))
-    System.setErr(java.io.PrintStream(java.io.BufferedOutputStream(java.io.FileOutputStream(java.io.FileDescriptor.err)), true, "UTF-8"))
-    enableUtf8Console()
-    if (args.isEmpty() || args[0].lowercase() in
-        setOf("-help", "--help", "-h", "/?", "помощь", "справка")
-    ) {
-        println(HELP.trimIndent())
-        return
-    }
-    var dry = false
-    var fileArg = args[0]
-    if (args[0].lowercase() in setOf("--проверить", "-проверить", "--check")) {
-        dry = true
-        if (args.size < 2) {
-            System.err.println("Нужно: Ncode --проверить <файл.ncode>")
-            kotlin.system.exitProcess(2)
-        }
-        fileArg = args[1]
-    }
-    val file = java.io.File(fileArg)
-    if (!file.exists()) {
-        System.err.println("Нет файла: " + fileArg)
-        kotlin.system.exitProcess(2)
-    }
-    val lines = readNcodeLines(file)
-    if (!dry) {
-        val probe = NcodeInterpreter()
-        probe.dryRun = true
-        probe.checkLabel = relLabel(fileArg)
-        var probeSkips: List<IntRange>
-        try {
-            probeSkips = probe.loadHandlers(lines)
-        } catch (e: NcodeError) {
-            System.err.println("Ошибка: " + e.message)
-            kotlin.system.exitProcess(1)
-            return
-        }
-        probe.resetScripts(safeCanon(file))
-        var probeCode = 0
-        try {
-            probeCode = probe.runLines(lines, 1, probeSkips)
-            probe.warnStaticCycles(file, lines)
-            if (probe.checkHandlers() != 0) probeCode = 1
-            if (probe.checkKeyHandlers() != 0) probeCode = 1
-        } catch (e: BreakSignal) {
-            System.err.println("стоп — только внутри цикла")
-            probeCode = 1
-        } catch (e: ContinueSignal) {
-            System.err.println("дальше — только внутри цикла")
-            probeCode = 1
-        }
-        if (probeCode != 0) kotlin.system.exitProcess(probeCode)
-    }
-    val interp = NcodeInterpreter()
-    interp.dryRun = dry
-    interp.checkLabel = relLabel(fileArg)
-    var code = 0
-    try {
-        val curSkips = try {
-            interp.loadHandlers(lines)
-        } catch (e: NcodeError) {
-            System.err.println("Ошибка: " + e.message)
-            kotlin.system.exitProcess(1)
-            return
-        }
-        interp.resetScripts(safeCanon(file))
-                code = interp.runLines(lines, 1, curSkips)
-                if (dry) {
-                    interp.warnStaticCycles(file, lines)
-                    if (interp.checkHandlers() != 0) code = 1
-                    if (interp.checkKeyHandlers() != 0) code = 1
-                }
-    } catch (e: BreakSignal) {
-        System.err.println("стоп — только внутри цикла")
-        code = 1
-    } catch (e: ContinueSignal) {
-        System.err.println("дальше — только внутри цикла")
-        code = 1
-    } catch (e: SceneStop) {
-        code = 0
-    }
-    if (code != 0) kotlin.system.exitProcess(code)
-    if (!dry) {
-        interp.warnNoWindowForInput()
-        while (interp.isWindowOpen()) {
-            interp.checkEvents()
-            try {
-                Thread.sleep(50)
-            } catch (e: InterruptedException) {
-                break
-            }
-        }
     }
 }

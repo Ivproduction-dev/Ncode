@@ -23,3 +23,7 @@ Thumbs.db
 *.jar
 !ncode.jar
 !gradle-wrapper.jar
+!kmp/libs/*.jar
+
+# Android локальное
+local.properties
