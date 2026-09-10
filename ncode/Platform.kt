@@ -99,12 +99,24 @@ data class PenSeg(
     val size: Int
 )
 
+data class VarLabel(
+    val text: String,
+    val x: Double,
+    val y: Double,
+    val size: Double,
+    val alpha: Int,
+    val r: Int,
+    val g: Int,
+    val b: Int
+)
+
 data class GfxFrame(
     val bgR: Int,
     val bgG: Int,
     val bgB: Int,
     val pens: List<PenSeg>,
-    val objs: List<GfxObj>
+    val objs: List<GfxObj>,
+    val labels: List<VarLabel>
 )
 
 interface NcodeAssets {
@@ -116,4 +128,5 @@ interface NcodeGfx {
     fun closeWindow()
     fun isOpen(): Boolean
     fun render(frame: GfxFrame)
+    fun setResizable(resizable: Boolean)
 }

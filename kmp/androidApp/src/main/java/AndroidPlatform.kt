@@ -588,6 +588,9 @@ class AndroidGfx(
         view?.postFrame(frame)
     }
 
+    override fun setResizable(resizable: Boolean) {
+    }
+
     inner class GameView(ctx: android.content.Context, val gw: Int, val gh: Int, val sink: NcodeInputSink) : android.view.View(ctx) {
         @Volatile private var frame: GfxFrame? = null
         private val imgCache = mutableMapOf<GfxImage, android.graphics.Bitmap>()
@@ -684,16 +687,17 @@ class AndroidGfx(
                 c.save()
                 c.translate(cx, cy)
                 c.rotate(-o.rot.toFloat())
-                paint.alpha = ((o.alpha.coerceIn(0, 100)) * 255 / 100)
                 val txt = o.text
                 val img = o.images.getOrNull(o.imageIx)
                 if (txt != null) {
                     paint.color = android.graphics.Color.rgb(o.r, o.g, o.b)
+                    paint.alpha = ((o.alpha.coerceIn(0, 100)) * 255 / 100)
                     paint.textSize = maxOf(1f, o.size.toFloat() * scale)
                     paint.textAlign = android.graphics.Paint.Align.CENTER
                     val base = -(paint.descent() + paint.ascent()) / 2f
                     c.drawText(txt, 0f, base, paint)
                 } else if (img != null) {
+                    paint.alpha = ((o.alpha.coerceIn(0, 100)) * 255 / 100)
                     val b = toBitmap(img)
                     val s = o.size / b.width.toDouble() * scale
                     val w = (b.width * s).toFloat()
@@ -702,12 +706,26 @@ class AndroidGfx(
                     c.drawBitmap(b, null, dst, paint)
                 } else {
                     paint.color = android.graphics.Color.rgb(o.r, o.g, o.b)
+                    paint.alpha = ((o.alpha.coerceIn(0, 100)) * 255 / 100)
                     paint.style = android.graphics.Paint.Style.FILL
                     val s = o.size.toFloat() * scale
                     if (o.circle) c.drawCircle(0f, 0f, s / 2f, paint)
                     else c.drawRect(-s / 2f, -s / 2f, s / 2f, s / 2f, paint)
                 }
                 c.restore()
+            }
+            for (l in f.labels) {
+                paint.color = android.graphics.Color.rgb(l.r, l.g, l.b)
+                paint.alpha = ((l.alpha.coerceIn(0, 100)) * 255 / 100)
+                paint.textSize = maxOf(1f, l.size.toFloat() * scale)
+                paint.textAlign = android.graphics.Paint.Align.CENTER
+                val base = -(paint.descent() + paint.ascent()) / 2f
+                c.drawText(
+                    l.text,
+                    offX + (gw / 2f + l.x.toFloat()) * scale,
+                    offY + (gh / 2f - l.y.toFloat()) * scale + base,
+                    paint
+                )
             }
         }
     }

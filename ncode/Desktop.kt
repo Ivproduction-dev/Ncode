@@ -431,7 +431,19 @@ class DesktopGfx : NcodeGfx {
     private var last: GfxFrame? = null
     private var pw = 800
     private var ph = 600
+    private var wantResizable = false
     private val imgCache = mutableMapOf<GfxImage, java.awt.image.BufferedImage>()
+
+    override fun setResizable(resizable: Boolean) {
+        wantResizable = resizable
+        val f = frame
+        if (f != null) {
+            try {
+                if (javax.swing.SwingUtilities.isEventDispatchThread()) f.isResizable = resizable
+                else javax.swing.SwingUtilities.invokeLater { try { f.isResizable = resizable } catch (_: Exception) {} }
+            } catch (_: Exception) {}
+        }
+    }
 
     override fun isOpen(): Boolean {
         val f = frame
@@ -450,44 +462,82 @@ class DesktopGfx : NcodeGfx {
         return b
     }
 
+    private fun drawLabel(g: java.awt.Graphics2D, txt: String, size: Double, r: Int, gg: Int, b: Int, alpha: Int) {
+        val savedC = g.composite
+        g.composite = java.awt.AlphaComposite.getInstance(java.awt.AlphaComposite.SRC_OVER, (alpha / 100f).coerceIn(0f, 1f))
+        g.color = java.awt.Color(r, gg, b)
+        g.font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, maxOf(1, size.toInt()))
+        val fm = g.getFontMetrics(g.font)
+        val tw = fm.stringWidth(txt)
+        val th = fm.ascent + fm.descent
+        g.drawString(txt, -tw / 2, -th / 2 + fm.ascent)
+        g.composite = savedC
+    }
+
+    private fun viewSize(): Pair<Int, Int> {
+        val p = panel
+        if (p != null && p.width > 0 && p.height > 0) return p.width to p.height
+        return pw to ph
+    }
+
+    private fun calcScale(): Triple<Double, Double, Double> {
+        val (vw, vh) = viewSize()
+        if (pw <= 0 || ph <= 0) return Triple(1.0, 0.0, 0.0)
+        val s = minOf(vw / pw.toDouble(), vh / ph.toDouble())
+        if (s.isNaN() || s.isInfinite() || s <= 0.0) return Triple(1.0, 0.0, 0.0)
+        val ox = (vw - pw * s) / 2.0
+        val oy = (vh - ph * s) / 2.0
+        return Triple(s, ox, oy)
+    }
+
+    private fun toWorld(ex: Int, ey: Int): Pair<Double, Double> {
+        val (s, ox, oy) = calcScale()
+        val wx = (ex - ox) / s - pw / 2.0
+        val wy = ph / 2.0 - (ey - oy) / s
+        return wx to wy
+    }
+
     private fun paintScene(g: java.awt.Graphics2D) {
+        g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY)
+        val (vw, vh) = viewSize()
+        val (scale, offX, offY) = calcScale()
+        // Чёрные поля вокруг игровой зоны (letterbox), чтобы не было искажений
+        g.color = java.awt.Color.BLACK
+        g.fillRect(0, 0, vw, vh)
         val f = last
         if (f == null) {
-            g.color = java.awt.Color.BLACK
-            g.fillRect(0, 0, pw, ph)
             return
         }
+        // Игровая зона в логических координатах pw x ph, по центру
         g.color = java.awt.Color(f.bgR, f.bgG, f.bgB)
-        g.fillRect(0, 0, pw, ph)
+        g.fillRect(offX.toInt(), offY.toInt(), (pw * scale + 0.999).toInt(), (ph * scale + 0.999).toInt())
         for (t in f.pens) {
             g.color = java.awt.Color(t.r, t.g, t.b)
-            g.stroke = java.awt.BasicStroke(t.size.toFloat())
+            g.stroke = java.awt.BasicStroke(maxOf(1f, (t.size * scale).toFloat()))
             g.drawLine(
-                (pw / 2.0 + t.x1).toInt(),
-                (ph / 2.0 - t.y1).toInt(),
-                (pw / 2.0 + t.x2).toInt(),
-                (ph / 2.0 - t.y2).toInt()
+                (offX + (pw / 2.0 + t.x1) * scale).toInt(),
+                (offY + (ph / 2.0 - t.y1) * scale).toInt(),
+                (offX + (pw / 2.0 + t.x2) * scale).toInt(),
+                (offY + (ph / 2.0 - t.y2) * scale).toInt()
             )
         }
         g.stroke = java.awt.BasicStroke(1f)
         for (o in f.objs) {
             if (!o.visible) continue
-            val cx = pw / 2.0 + o.x
-            val cy = ph / 2.0 - o.y
+            val cx = offX + (pw / 2.0 + o.x) * scale
+            val cy = offY + (ph / 2.0 - o.y) * scale
             val savedT = g.transform
             val savedC = g.composite
             g.translate(cx, cy)
+            g.scale(scale, scale)
             g.rotate(Math.toRadians(-o.rot))
             g.composite = java.awt.AlphaComposite.getInstance(java.awt.AlphaComposite.SRC_OVER, (o.alpha / 100f).coerceIn(0f, 1f))
             val img = o.images.getOrNull(o.imageIx)
             val txt = o.text
             if (txt != null) {
-                g.color = java.awt.Color(o.r, o.g, o.b)
-                g.font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, maxOf(1, o.size.toInt()))
-                val fm = g.getFontMetrics(g.font)
-                val tw = fm.stringWidth(txt)
-                val th = fm.ascent + fm.descent
-                g.drawString(txt, -tw / 2, -th / 2 + fm.ascent)
+                drawLabel(g, txt, o.size, o.r, o.g, o.b, o.alpha)
             } else if (img != null) {
                 val b = toBuffered(img)
                 val s = o.size / b.width.toDouble()
@@ -502,6 +552,15 @@ class DesktopGfx : NcodeGfx {
             }
             g.transform = savedT
             g.composite = savedC
+        }
+        for (l in f.labels) {
+            val savedT = g.transform
+            val cx = offX + (pw / 2.0 + l.x) * scale
+            val cy = offY + (ph / 2.0 - l.y) * scale
+            g.translate(cx, cy)
+            g.scale(scale, scale)
+            drawLabel(g, l.text, l.size, l.r, l.g, l.b, l.alpha)
+            g.transform = savedT
         }
     }
 
@@ -524,6 +583,7 @@ class DesktopGfx : NcodeGfx {
         try {
             javax.swing.SwingUtilities.invokeAndWait {
                 val f = javax.swing.JFrame(title)
+                f.isResizable = wantResizable
                 f.defaultCloseOperation = javax.swing.WindowConstants.DO_NOTHING_ON_CLOSE
                 f.addWindowListener(object : java.awt.event.WindowAdapter() {
                     override fun windowClosing(e: java.awt.event.WindowEvent?) {
@@ -565,18 +625,27 @@ class DesktopGfx : NcodeGfx {
                 p.addMouseListener(object : java.awt.event.MouseAdapter() {
                     override fun mousePressed(e: java.awt.event.MouseEvent) {
                         p.requestFocusInWindow()
-                        sink.mouseDown(e.x - p.width / 2.0, p.height / 2.0 - e.y)
+                        val (wx, wy) = toWorld(e.x, e.y)
+                        sink.mouseDown(wx, wy)
                     }
                     override fun mouseReleased(e: java.awt.event.MouseEvent) {
-                        sink.mouseUp(e.x - p.width / 2.0, p.height / 2.0 - e.y)
+                        val (wx, wy) = toWorld(e.x, e.y)
+                        sink.mouseUp(wx, wy)
                     }
                 })
                 p.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
                     override fun mouseMoved(e: java.awt.event.MouseEvent) {
-                        sink.mouseMove(e.x - p.width / 2.0, p.height / 2.0 - e.y)
+                        val (wx, wy) = toWorld(e.x, e.y)
+                        sink.mouseMove(wx, wy)
                     }
                     override fun mouseDragged(e: java.awt.event.MouseEvent) {
-                        sink.mouseMove(e.x - p.width / 2.0, p.height / 2.0 - e.y)
+                        val (wx, wy) = toWorld(e.x, e.y)
+                        sink.mouseMove(wx, wy)
+                    }
+                })
+                p.addComponentListener(object : java.awt.event.ComponentAdapter() {
+                    override fun componentResized(e: java.awt.event.ComponentEvent?) {
+                        panel?.repaint()
                     }
                 })
                 f.pack()
@@ -653,8 +722,10 @@ private val HELP = """
       записать/добавить/прочитать/удалить файл, есть ли файл, создать папку — файлы
       найти/заменить — строки; вещать X данные Y — данные в обработчик
       создать окно/открыть окно, закрыть окно — окно 800×600 mygame
+      масштабирование окна истина/ложь (можно 1/0) — по умолчанию ложь: окно фиксировано; истина: можно разворачивать, всё тянется само
       нарисовать <имя> x y, задать/изменить прозрачность/размер/поворот/цвет/образ/форму/слой/скорость объекту — 2д
       написать/надпись <имя> <текст>, наверх/выше/вниз/ниже [имя], задать фон R G B|цвет, показать/скрыть/очистить — 2д
+      показать переменную <имя> x y размер прозрачность r g b, скрыть переменную <имя> — переменная на экране
       икс/x/х, игрек/y/у, размер, угол/поворот, виден, прозрачность, форма, скорость <имя>,
       касается А Б/край, расстояние А Б, нажата К/мышь — запросы
       свойство х/y/размера/ширины/высоты/угла/костюма/прозрачности/красного/зеленого/синего/видимости/текста/пера/слоя/формы/скорости объекта <имя>

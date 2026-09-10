@@ -1157,6 +1157,22 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 }
             }
         }
+        pumpLabels()
+    }
+
+    private var lastLabelRender = 0L
+
+    private fun pumpLabels() {
+        if (varShows.isEmpty()) return
+        var any = false
+        synchronized(gfxLock) {
+            any = varShows.any { it.value.visible }
+        }
+        if (!any) return
+        val now = platform.clock.nanoTime()
+        if (now - lastLabelRender < 100_000_000) return
+        lastLabelRender = now
+        renderCurrent()
     }
 
     private fun clickHits(name: String, wx: Double, wy: Double): Boolean {
@@ -1788,6 +1804,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     private var gfxEverOpened = false
     private var gfxW = 800
     private var gfxH = 600
+    private var windowScalable = false
     private var bgR = 0
     private var bgG = 0
     private var bgB = 0
@@ -1805,13 +1822,31 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         return platform.gfx.isOpen()
     }
 
+    private data class VarSlot(
+        val x: Double,
+        val y: Double,
+        val size: Double,
+        val alpha: Int,
+        val r: Int,
+        val g: Int,
+        val b: Int,
+        val visible: Boolean
+    )
+
+    private val varShows = mutableMapOf<String, VarSlot>()
+
     private fun renderCurrent() {
         if (dryRun || !platform.gfx.isOpen()) return
         val snap: List<GObj>
         val trails: List<PenSeg>
+        val labels: List<VarLabel>
         synchronized(gfxLock) {
             snap = gfxObjs.map { it.copy() }
             trails = penLines.toList()
+            labels = varShows.mapNotNull { (name, s) ->
+                if (!s.visible) null
+                else VarLabel(vars[name] ?: return@mapNotNull null, s.x, s.y, s.size, s.alpha, s.r, s.g, s.b)
+            }
         }
         platform.gfx.render(
             GfxFrame(
@@ -1821,7 +1856,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                         it.name, it.x, it.y, it.size, it.rot, it.r, it.g, it.b, it.alpha,
                         it.costumes.toList(), it.costume, it.visible, it.circle, it.text
                     )
-                }
+                },
+                labels
             )
         )
     }
@@ -1869,8 +1905,29 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         gfxW = w
         gfxH = h
         platform.gfx.openWindow(w, h, title, this) { closeRequested = true }
+        try {
+            platform.gfx.setResizable(windowScalable)
+        } catch (_: Exception) {}
         gfxEverOpened = true
         renderCurrent()
+    }
+
+    private fun runMasshtabOkna(line: String) {
+        val rest = keywordTail(line, "масштабирование окна").trim()
+        if (rest.isEmpty()) throw NcodeError("нужно: масштабирование окна истина/ложь (можно 1/0)")
+        val v = evalExpression(rest)
+        val flag = when (v.lowercase(java.util.Locale.ROOT)) {
+            "истина", "да", "правда", "1" -> true
+            "ложь", "нет", "неправда", "0" -> false
+            else -> throw NcodeError("тут нужно истина/ложь или 1/0, а тут `$v`")
+        }
+        windowScalable = flag
+        if (dryRun) return
+        if (platform.gfx.isOpen()) {
+            try {
+                platform.gfx.setResizable(flag)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun runZakrytOkno(line: String) {
@@ -2088,6 +2145,54 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         throw NcodeError("неизвестная команда")
     }
 
+    private fun runPokazatPeremennoy(line: String) {
+        val rest = keywordTail(line, "показать переменную").trim()
+        val toks = if (rest.isEmpty()) emptyList() else rest.split(Regex("\\s+"))
+        if (toks.size != 8) throw NcodeError("нужно: показать переменную <имя> x y размер прозрачность r g b")
+        val name = toks[0].lowercase(java.util.Locale.ROOT)
+        if (!nameRegex.matches(toks[0])) throw NcodeError("плохое имя `${toks[0]}`")
+        if (!vars.containsKey(name)) throw NcodeError("нет переменной `${toks[0]}` — сначала `задать`")
+        val x = evalArithOperand(toks[1])
+        val y = evalArithOperand(toks[2])
+        val sizeText = evalExpression(toks[3])
+        if (!numberRegex.matches(sizeText)) throw NcodeError("тут нужно число, а тут `$sizeText`")
+        if (sizeText.toDouble() <= 0) throw NcodeError("размер больше нуля")
+        val alphaText = evalExpression(toks[4])
+        if (!numberRegex.matches(alphaText)) throw NcodeError("тут нужно число, а тут `$alphaText`")
+        val ad = alphaText.toDouble()
+        if (ad != kotlin.math.floor(ad) || ad < 0 || ad > 100) throw NcodeError("прозрачность — целое 0..100")
+        val r = evalArithOperand(toks[5])
+        val g = evalArithOperand(toks[6])
+        val b = evalArithOperand(toks[7])
+        for ((c, n) in listOf(r to "красный", g to "зелёный", b to "синий")) {
+            if (c != kotlin.math.floor(c) || c < 0 || c > 255) throw NcodeError(n + " — целое 0..255")
+        }
+        if (dryRun) {
+            synchronized(gfxLock) {
+                varShows[name] = VarSlot(x, y, sizeText.toDouble(), ad.toInt(), r.toInt(), g.toInt(), b.toInt(), true)
+            }
+            return
+        }
+        requireWindow()
+        synchronized(gfxLock) {
+            varShows[name] = VarSlot(x, y, sizeText.toDouble(), ad.toInt(), r.toInt(), g.toInt(), b.toInt(), true)
+        }
+        renderCurrent()
+    }
+
+    private fun runSkrytPeremennoy(line: String) {
+        val rest = keywordTail(line, "скрыть переменную").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: скрыть переменную <имя>")
+        val name = rest.lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val s = varShows[name] ?: throw NcodeError("переменная не показана")
+            varShows[name] = s.copy(visible = false)
+        }
+        renderCurrent()
+    }
+
     private fun lastDrawnKey(): String {
         return lastDrawn ?: throw NcodeError("нечего показать — сначала нарисовать")
     }
@@ -2198,6 +2303,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         synchronized(gfxLock) {
             gfxObjs.clear()
             penLines.clear()
+            varShows.clear()
         }
         renderCurrent()
     }
@@ -2869,10 +2975,16 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runSozdatOkno(line, "открыть окно")
             low == "закрыть окно" ->
                 runZakrytOkno(line)
+            low == "масштабирование окна" || low.startsWith("масштабирование окна ") || low.startsWith("масштабирование окна\t") ->
+                runMasshtabOkna(line)
             low == "нарисовать" || low.startsWith("нарисовать ") || low.startsWith("нарисовать\t") ||
                 low == "рисовать" || low.startsWith("рисовать ") || low.startsWith("рисовать\t") ||
                 low == "рисуй" || low.startsWith("рисуй ") || low.startsWith("рисуй\t") ->
                 runRisovat(line)
+            low == "показать переменную" || low.startsWith("показать переменную ") || low.startsWith("показать переменную\t") ->
+                runPokazatPeremennoy(line)
+            low == "скрыть переменную" || low.startsWith("скрыть переменную ") || low.startsWith("скрыть переменную\t") ->
+                runSkrytPeremennoy(line)
             low == "показать" || low.startsWith("показать ") || low.startsWith("показать\t") ->
                 runPokazat(line, "показать", true)
             low == "спрятать" || low.startsWith("спрятать ") || low.startsWith("спрятать\t") ->
@@ -2953,7 +3065,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runZapisat(line, false)
             low == "добавить в файл" || low.startsWith("добавить в файл ") || low.startsWith("добавить в файл\t") ->
                 runZapisat(line, true)
-            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / создать окно / рисовать / показать / задать прозрачность / задать образ объекту / играть звук / остановить звук / задать громкость для звука / идти / написать / наверх / создать клон / вызвать / при нажатии)")
+            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / создать окно / масштабирование окна / рисовать / показать / задать прозрачность / задать образ объекту / играть звук / остановить звук / задать громкость для звука / идти / написать / наверх / создать клон / вызвать / при нажатии)")
         }
     }
 
