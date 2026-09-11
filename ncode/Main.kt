@@ -2356,7 +2356,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         var text: String? = null,
         var vel: Double = 0.0,
         var lastMove: Long = 0,
-        var bodyType: Int = 0,
+        var bodyType: Int = 1,
         var mass: Double = 1.0,
         var rest: Double = 0.2,
         var fric: Double = 0.5,
@@ -2428,6 +2428,23 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
 
     private val varShows = mutableMapOf<String, VarSlot>()
 
+    private data class Svet(
+        val name: String,
+        var x: Double,
+        var y: Double,
+        var size: Double,
+        var r: Int,
+        var g: Int,
+        var b: Int,
+        var power: Int,
+        var flicker: Int,
+        var visible: Boolean,
+        var follow: String? = null
+    )
+
+    private val svetObjs = mutableListOf<Svet>()
+    private var darkness = 0
+
     private fun applyCamera() {
         val target = camFollow ?: return
         val o = synchronized(gfxLock) { gfxObjs.find { it.name == target }?.copy() } ?: return
@@ -2439,12 +2456,26 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         }
     }
 
+    private fun applyLights() {
+        synchronized(gfxLock) {
+            for (s in svetObjs) {
+                val t = s.follow ?: continue
+                val o = gfxObjs.find { it.name == t } ?: continue
+                s.x = o.x
+                s.y = o.y
+            }
+        }
+    }
+
     private fun renderCurrent() {
         if (dryRun || !platform.gfx.isOpen()) return
         applyCamera()
+        applyLights()
         val snap: List<GObj>
         val trails: List<PenSeg>
         val labels: List<VarLabel>
+        val svetSnap: List<Svet>
+        val dark: Int
         synchronized(gfxLock) {
             snap = gfxObjs.map { it.copy() }
             trails = penLines.toList()
@@ -2452,6 +2483,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 if (!s.visible) null
                 else VarLabel(vars[name] ?: return@mapNotNull null, s.x, s.y, s.size, s.alpha, s.r, s.g, s.b)
             }
+            svetSnap = svetObjs.map { it.copy() }
+            dark = darkness
         }
         platform.gfx.render(
             GfxFrame(
@@ -2462,7 +2495,11 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                         it.costumes.toList(), it.costume, it.visible, it.circle, it.text
                     )
                 },
-                labels
+                labels,
+                svetSnap.map {
+                    Light(it.name, it.x, it.y, it.size, it.r, it.g, it.b, it.power, it.flicker, it.visible)
+                },
+                dark
             )
         )
     }
@@ -2540,9 +2577,11 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             gfxObjs.clear()
             penLines.clear()
             varShows.clear()
+            svetObjs.clear()
         }
         joints.clear()
         jointSeq = 0
+        darkness = 0
         lastDrawn = null
         gfxEverOpened = false
         gfxW = 800
@@ -2691,6 +2730,170 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             try {
                 platform.gfx.setResizable(flag)
             } catch (_: Exception) {}
+        }
+    }
+
+    private fun runSozdatSvet(line: String) {
+        val usage = "нужно: создать свет <имя> x y, пример: создать свет лампа 100 50"
+        val rest = keywordTail(line, "создать свет").trim()
+        val toks = if (rest.isEmpty()) emptyList() else rest.split(Regex("\\s+"))
+        if (toks.size != 3) throw NcodeError(usage)
+        if (!nameRegex.matches(toks[0])) throw NcodeError("плохое имя `${toks[0]}` (буквы/цифры/_ без кавычек)")
+        val x = evalArithOperand(toks[1])
+        val y = evalArithOperand(toks[2])
+        val name = toks[0].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            if (svetObjs.any { it.name == name }) throw NcodeError("свет `$name` уже есть")
+            svetObjs.add(Svet(name, x, y, 150.0, 255, 255, 255, 80, 0, true))
+        }
+        renderCurrent()
+    }
+
+    private fun isSvetProp(line: String): Boolean {
+        val toks = line.trim().split(Regex("\\s+"))
+        if (toks.size < 2) return false
+        val a = toks[0].lowercase(java.util.Locale.ROOT)
+        if (a != "задать" && a != "присвоить" && a != "сделать" && a != "изменить" && a != "поменять") return false
+        val p = toks[1].lowercase(java.util.Locale.ROOT)
+        if (p != "размер" && p != "цвет" && p != "силу" && p != "мерцание") return false
+        for (x in toks) if (x.lowercase(java.util.Locale.ROOT) == "свету") return true
+        return false
+    }
+
+    private fun runSvetProp(line: String) {
+        val t = line.trim()
+        var j = 0
+        while (j < t.length && (t[j].isLetterOrDigit() || t[j] == '_')) j++
+        val afterAct = t.substring(j).trim()
+        var k = 0
+        while (k < afterAct.length && (afterAct[k].isLetterOrDigit() || afterAct[k] == '_')) k++
+        val prop = afterAct.substring(0, k).lowercase(java.util.Locale.ROOT)
+        val tail = afterAct.substring(k).trim()
+        val toks = tail.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        var idx = -1
+        for (q in toks.indices) if (toks[q].lowercase(java.util.Locale.ROOT) == "свету") idx = q
+        if (idx < 0) throw NcodeError("нужно слово `свету`")
+        if (idx + 1 != toks.size - 1) throw NcodeError("после `свету` нужно одно имя")
+        val name = toks[idx + 1].lowercase(java.util.Locale.ROOT)
+        val before = toks.take(idx)
+        if (prop == "цвет") {
+            val named = if (before.size == 1) namedColor(before[0]) else null
+            if (before.size != 3 && named == null) throw NcodeError("нужно: задать цвет R G B свету <имя>")
+            val r = if (named != null) named[0].toDouble() else evalArithOperand(before[0])
+            val g = if (named != null) named[1].toDouble() else evalArithOperand(before[1])
+            val b = if (named != null) named[2].toDouble() else evalArithOperand(before[2])
+            for ((c, n) in listOf(r to "красный", g to "зелёный", b to "синий")) {
+                if (c != kotlin.math.floor(c) || c < 0 || c > 255) throw NcodeError(n + " — целое 0..255")
+            }
+            if (dryRun) return
+            requireWindow()
+            synchronized(gfxLock) {
+                val o = svetObjs.find { it.name == name } ?: throw NcodeError("свет не создан")
+                o.r = r.toInt()
+                o.g = g.toInt()
+                o.b = b.toInt()
+            }
+            renderCurrent()
+            return
+        }
+        if (before.isEmpty()) throw NcodeError("нужно: задать $prop свету <имя>")
+        val v = evalExpression(before.joinToString(" "))
+        if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
+        val d = v.toDouble()
+        if (prop == "размер") {
+            if (d <= 0) throw NcodeError("размер больше нуля")
+            if (dryRun) return
+            requireWindow()
+            synchronized(gfxLock) {
+                val o = svetObjs.find { it.name == name } ?: throw NcodeError("свет не создан")
+                o.size = d
+            }
+            renderCurrent()
+            return
+        }
+        if (d != kotlin.math.floor(d) || d < 0 || d > 100) throw NcodeError("$prop — целое 0..100")
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = svetObjs.find { it.name == name } ?: throw NcodeError("свет не создан")
+            if (prop == "силу") o.power = d.toInt() else o.flicker = d.toInt()
+        }
+        renderCurrent()
+    }
+
+    private fun runTemnota(line: String) {
+        val rest = keywordTail(line, "задать темноту").trim()
+        if (rest.isEmpty()) throw NcodeError("нужно: задать темноту 0..100")
+        val v = evalExpression(rest)
+        if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
+        val d = v.toDouble()
+        if (d != kotlin.math.floor(d) || d < 0 || d > 100) throw NcodeError("темнота — целое 0..100")
+        darkness = d.toInt()
+        if (dryRun) return
+        renderCurrent()
+    }
+
+    private fun runPokazatSvet(line: String, keyword: String, show: Boolean) {
+        val rest = keywordTail(line, keyword).trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: $keyword <имя>")
+        if (!nameRegex.matches(rest)) throw NcodeError("плохое имя `$rest`")
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = svetObjs.find { it.name == rest.lowercase(java.util.Locale.ROOT) } ?: throw NcodeError("свет не создан")
+            o.visible = show
+        }
+        renderCurrent()
+    }
+
+    private fun runUdalitSvet(line: String) {
+        val rest = keywordTail(line, "удалить свет").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: удалить свет <имя>")
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val ix = svetObjs.indexOfFirst { it.name == rest.lowercase(java.util.Locale.ROOT) }
+            if (ix < 0) throw NcodeError("свет не создан")
+            svetObjs.removeAt(ix)
+        }
+        renderCurrent()
+    }
+
+    private fun runPrivyazat(line: String) {
+        val usage = "нужно: привязать свет <имя> к объекту <цель>, пример: привязать свет фонарь к объекту игрок"
+        val rest = keywordTail(line, "привязать свет").trim()
+        val toks = if (rest.isEmpty()) emptyList() else rest.split(Regex("\\s+"))
+        var ki = -1
+        for (q in toks.indices) if (toks[q].lowercase(java.util.Locale.ROOT) == "к") ki = q
+        if (ki < 0 || ki != 1 || toks.size !in 3..4) throw NcodeError(usage)
+        if (!nameRegex.matches(toks[0])) throw NcodeError("плохое имя `${toks[0]}`")
+        val target: String
+        val afterK = toks.drop(ki + 1)
+        if (afterK.size == 2 && (afterK[0].lowercase(java.util.Locale.ROOT) == "объекту" || afterK[0].lowercase(java.util.Locale.ROOT) == "обьекту")) {
+            target = afterK[1]
+        } else if (afterK.size == 1) {
+            target = afterK[0]
+        } else throw NcodeError(usage)
+        if (!nameRegex.matches(target)) throw NcodeError("плохое имя `$target`")
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = svetObjs.find { it.name == toks[0].lowercase(java.util.Locale.ROOT) } ?: throw NcodeError("свет не создан")
+            o.follow = target.lowercase(java.util.Locale.ROOT)
+        }
+        renderCurrent()
+    }
+
+    private fun runOtvyazat(line: String) {
+        val rest = keywordTail(line, "отвязать свет").trim()
+        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: отвязать свет <имя>")
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = svetObjs.find { it.name == rest.lowercase(java.util.Locale.ROOT) } ?: throw NcodeError("свет не создан")
+            o.follow = null
         }
     }
 
@@ -2920,6 +3123,15 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             return
         }
         if (before.isEmpty()) throw NcodeError("нужно: задать $prop объекту <имя>")
+        if (before.size > 1 && (prop == "размер" || prop == "прозрачность" || prop == "поворот" || prop == "угол" || prop == "скорость")) {
+            val hint = when (prop) {
+                "размер" -> "размер — одно число (квадрат!). Прямоугольник: задай размер + задай коллайдер коробка ШИРИНА ВЫСОТА объекту <имя>"
+                "прозрачность" -> "прозрачность — одно целое число 0..100"
+                "скорость" -> "скорость — одно число"
+                else -> "$prop — одно число (градусы)"
+            }
+            throw NcodeError("тут нужно одно число, а тут `" + before.joinToString(" ") + "` (" + hint + ")")
+        }
         val v = evalExpression(before.joinToString(" "))
         if (prop == "прозрачность") {
             if (!numberRegex.matches(v)) throw NcodeError("тут нужно число, а тут `$v`")
@@ -3669,6 +3881,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             gfxObjs.clear()
             penLines.clear()
             varShows.clear()
+            svetObjs.clear()
         }
         renderCurrent()
     }
@@ -4353,6 +4566,10 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runGromkost(line)
             isBg(line) ->
                 runBg(line)
+            isSvetProp(line) ->
+                runSvetProp(line)
+            low == "задать темноту" || low.startsWith("задать темноту ") || low.startsWith("задать темноту\t") ->
+                runTemnota(line)
             (low == "задать" || low.startsWith("задать ") || low.startsWith("задать\t")) && !isPhysZadat(low) ->
                 runZadat(line)
             isPrintCommand(low) ->
@@ -4403,10 +4620,16 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runPokazatPeremennoy(line)
             low == "скрыть переменную" || low.startsWith("скрыть переменную ") || low.startsWith("скрыть переменную\t") ->
                 runSkrytPeremennoy(line)
+            low == "показать свет" || low.startsWith("показать свет ") || low.startsWith("показать свет\t") ->
+                runPokazatSvet(line, "показать свет", true)
             low == "показать" || low.startsWith("показать ") || low.startsWith("показать\t") ->
                 runPokazat(line, "показать", true)
+            low == "спрятать свет" || low.startsWith("спрятать свет ") || low.startsWith("спрятать свет\t") ->
+                runPokazatSvet(line, "спрятать свет", false)
             low == "спрятать" || low.startsWith("спрятать ") || low.startsWith("спрятать\t") ->
                 runPokazat(line, "спрятать", false)
+            low == "скрыть свет" || low.startsWith("скрыть свет ") || low.startsWith("скрыть свет\t") ->
+                runPokazatSvet(line, "скрыть свет", false)
             low == "скрыть" || low.startsWith("скрыть ") || low.startsWith("скрыть\t") ->
                 runPokazat(line, "скрыть", false)
             low == "наверх" || low.startsWith("наверх ") || low.startsWith("наверх\t") ->
@@ -4425,6 +4648,14 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runOchistit(line)
             low == "создать клон" || low.startsWith("создать клон ") || low.startsWith("создать клон\t") ->
                 runKlon(line)
+            low == "создать свет" || low.startsWith("создать свет ") || low.startsWith("создать свет\t") ->
+                runSozdatSvet(line)
+            low == "привязать свет" || low.startsWith("привязать свет ") || low.startsWith("привязать свет\t") ->
+                runPrivyazat(line)
+            low == "отвязать свет" || low.startsWith("отвязать свет ") || low.startsWith("отвязать свет\t") ->
+                runOtvyazat(line)
+            low == "удалить свет" || low.startsWith("удалить свет ") || low.startsWith("удалить свет\t") ->
+                runUdalitSvet(line)
             low == "удалить файл" || low.startsWith("удалить файл ") || low.startsWith("удалить файл\t") ->
                 runUdalitFile(line)
             low == "удалить из базы" || low.startsWith("удалить из базы ") || low.startsWith("удалить из базы\t") ->
@@ -4561,7 +4792,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runZapisat(line, true)
             low == "запрос" || low.startsWith("запрос ") || low.startsWith("запрос\t") ->
                 runZapros(line)
-            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / создать окно / масштабирование окна / рисовать / показать / задать прозрачность / задать образ объекту / играть звук / остановить звук / задать громкость для звука / идти / написать / наверх / создать клон / вызвать / при нажатии / запрос / записать в базу / создать в базе / прочитать базу / удалить из базы)")
+            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / создать окно / масштабирование окна / рисовать / показать / задать прозрачность / задать образ объекту / играть звук / остановить звук / задать громкость для звука / идти / написать / наверх / создать клон / вызвать / при нажатии / запрос / записать в базу / создать в базе / прочитать базу / удалить из базы / создать свет / темнота)")
         }
     }
 

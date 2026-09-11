@@ -11,12 +11,16 @@ java {
 dependencies {
     implementation(project(":shared"))
     implementation(files("../libs/jlayer.jar", "../libs/jorbis.jar", "../libs/jaad.jar"))
+    implementation("com.badlogicgames.gdx:gdx-backend-lwjgl3:1.12.1")
+    implementation("com.badlogicgames.gdx:gdx-platform:1.12.1:natives-desktop")
+    implementation("com.badlogicgames.gdx:gdx-freetype:1.12.1")
+    implementation("com.badlogicgames.gdx:gdx-freetype-platform:1.12.1:natives-desktop")
 }
 
 sourceSets {
     main {
         kotlin.srcDir("../../ncode")
-        kotlin.include("Desktop.kt", "Ide.kt")
+        kotlin.include("Desktop.kt", "Ide.kt", "GdxDesktop.kt")
     }
 }
 

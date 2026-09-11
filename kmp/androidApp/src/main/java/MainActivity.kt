@@ -1,6 +1,5 @@
 package ncode.app
 
-import android.app.Activity
 import android.os.Bundle
 import android.widget.FrameLayout
 import android.widget.ScrollView
@@ -11,7 +10,7 @@ import ncode.NcodeError
 import ncode.NcodeInterpreter
 import ncode.SceneStop
 
-class MainActivity : Activity() {
+class MainActivity : com.badlogic.gdx.backends.android.AndroidApplication() {
     private lateinit var tv: TextView
     private lateinit var root: FrameLayout
     private lateinit var consoleView: ScrollView

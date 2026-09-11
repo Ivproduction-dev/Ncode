@@ -110,13 +110,28 @@ data class VarLabel(
     val b: Int
 )
 
+data class Light(
+    val name: String,
+    val x: Double,
+    val y: Double,
+    val size: Double,
+    val r: Int,
+    val g: Int,
+    val b: Int,
+    val power: Int,
+    val flicker: Int,
+    val visible: Boolean
+)
+
 data class GfxFrame(
     val bgR: Int,
     val bgG: Int,
     val bgB: Int,
     val pens: List<PenSeg>,
     val objs: List<GfxObj>,
-    val labels: List<VarLabel>
+    val labels: List<VarLabel>,
+    val lights: List<Light> = emptyList(),
+    val darkness: Int = 0
 )
 
 interface NcodeAssets {

@@ -1,7 +1,9 @@
 package ncode.app
 
+import ncode.GdxSoundLine
 import ncode.GfxFrame
 import ncode.GfxImage
+import ncode.NcodeGdxGame
 import ncode.NcodeAssets
 import ncode.NcodeClock
 import ncode.NcodeConsole
@@ -513,6 +515,14 @@ class AndroidSound(private val ctx: android.content.Context) : NcodeSound {
         }
     }
     override fun openLine(rate: Int, channels: Int): NcodeSoundLine {
+        return try {
+            if (com.badlogic.gdx.Gdx.app == null) throw IllegalStateException()
+            GdxSoundLine(rate, channels >= 2)
+        } catch (e: Exception) {
+            oldOpenLine(rate, channels)
+        }
+    }
+    private fun oldOpenLine(rate: Int, channels: Int): NcodeSoundLine {
         val mask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val track = try {
             val minBuf = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
@@ -546,7 +556,7 @@ class AndroidGfx(
     private val showConsole: () -> Unit
 ) : NcodeGfx {
     @Volatile private var open = false
-    @Volatile private var view: GameView? = null
+    private var game: NcodeGdxGame? = null
     private var onCloseCb: (() -> Unit)? = null
     private var lastSink: NcodeInputSink? = null
 
@@ -556,6 +566,10 @@ class AndroidGfx(
         if (open) throw NcodeError("окно уже есть — сначала закрыть окно")
         onCloseCb = onClose
         lastSink = sink
+        val g = NcodeGdxGame()
+        g.baseW = w
+        g.baseH = h
+        g.sink = sink
         val latch = CountDownLatch(1)
         val ok = AtomicReference(false)
         act.runOnUiThread {
@@ -564,11 +578,17 @@ class AndroidGfx(
                     latch.countDown()
                     return@runOnUiThread
                 }
-                val v = GameView(act, w, h, sink)
-                view = v
+                val app = act as? com.badlogic.gdx.backends.android.AndroidApplication
+                if (app == null) {
+                    latch.countDown()
+                    return@runOnUiThread
+                }
+                val v = app.initializeForView(g)
+                game = g
                 showGame(v)
                 open = true
                 ok.set(true)
+            } catch (e: Exception) {
             } finally {
                 latch.countDown()
             }
@@ -579,14 +599,21 @@ class AndroidGfx(
 
     override fun closeWindow() {
         open = false
-        view = null
+        game = null
         act.runOnUiThread { showConsole() }
+    }
+
+    override fun setResizable(resizable: Boolean) {
+    }
+
+    override fun setCamera(x: Double, y: Double) {
+        game?.setCam(x, y)
     }
 
     fun userBack(): Boolean {
         if (!open) return false
         open = false
-        view = null
+        game = null
         act.runOnUiThread { showConsole() }
         try {
             onCloseCb?.invoke()
@@ -603,158 +630,7 @@ class AndroidGfx(
     }
 
     override fun render(frame: GfxFrame) {
-        view?.postFrame(frame)
-    }
-
-    override fun setResizable(resizable: Boolean) {
-    }
-
-    @Volatile private var camX = 0.0
-    @Volatile private var camY = 0.0
-
-    override fun setCamera(x: Double, y: Double) {
-        camX = x
-        camY = y
-        view?.postInvalidate()
-    }
-
-    inner class GameView(ctx: android.content.Context, val gw: Int, val gh: Int, val sink: NcodeInputSink) : android.view.View(ctx) {
-        @Volatile private var frame: GfxFrame? = null
-        private val imgCache = mutableMapOf<GfxImage, android.graphics.Bitmap>()
-        private var scale = 1f
-        private var offX = 0f
-        private var offY = 0f
-        private var activePtr = -1
-
-        fun postFrame(f: GfxFrame) {
-            frame = f
-            postInvalidate()
-        }
-
-        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-            super.onSizeChanged(w, h, oldw, oldh)
-            scale = minOf(w / gw.toFloat(), h / gh.toFloat())
-            offX = (w - gw * scale) / 2f
-            offY = (h - gh * scale) / 2f
-        }
-
-        private fun toWorld(sx: Float, sy: Float): Pair<Double, Double> {
-            val wx = (sx - offX) / scale - gw / 2.0 + camX
-            val wy = gh / 2.0 - (sy - offY) / scale + camY
-            return wx to wy
-        }
-
-        override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
-            when (e.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_POINTER_DOWN -> {
-                    if (activePtr == -1) {
-                        val ix = e.actionIndex
-                        activePtr = e.getPointerId(ix)
-                        val (wx, wy) = toWorld(e.getX(ix), e.getY(ix))
-                        sink.mouseDown(wx, wy)
-                    }
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    var i = 0
-                    while (i < e.pointerCount) {
-                        if (e.getPointerId(i) == activePtr) {
-                            val (wx, wy) = toWorld(e.getX(i), e.getY(i))
-                            sink.mouseMove(wx, wy)
-                            break
-                        }
-                        i++
-                    }
-                }
-                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_POINTER_UP, android.view.MotionEvent.ACTION_CANCEL -> {
-                    val ix = e.actionIndex
-                    if (e.getPointerId(ix) == activePtr) {
-                        activePtr = -1
-                        val (wx, wy) = toWorld(e.getX(ix), e.getY(ix))
-                        sink.mouseUp(wx, wy)
-                    }
-                }
-            }
-            return true
-        }
-
-        private fun toBitmap(img: GfxImage): android.graphics.Bitmap {
-            imgCache[img]?.let { return it }
-            val b = android.graphics.Bitmap.createBitmap(img.pixels, img.w, img.h, android.graphics.Bitmap.Config.ARGB_8888)
-            imgCache[img] = b
-            return b
-        }
-
-        override fun onDraw(c: android.graphics.Canvas) {
-            super.onDraw(c)
-            val f = frame
-            if (f == null) {
-                c.drawColor(android.graphics.Color.BLACK)
-                return
-            }
-            c.drawColor(android.graphics.Color.rgb(f.bgR, f.bgG, f.bgB))
-            val linePaint = android.graphics.Paint()
-            linePaint.style = android.graphics.Paint.Style.STROKE
-            for (t in f.pens) {
-                linePaint.color = android.graphics.Color.rgb(t.r, t.g, t.b)
-                linePaint.strokeWidth = maxOf(1f, t.size * scale)
-                c.drawLine(
-                    offX + (gw / 2f + t.x1.toFloat() - camX.toFloat()) * scale,
-                    offY + (gh / 2f - t.y1.toFloat() + camY.toFloat()) * scale,
-                    offX + (gw / 2f + t.x2.toFloat() - camX.toFloat()) * scale,
-                    offY + (gh / 2f - t.y2.toFloat() + camY.toFloat()) * scale,
-                    linePaint
-                )
-            }
-            val paint = android.graphics.Paint()
-            paint.isAntiAlias = true
-            for (o in f.objs) {
-                if (!o.visible) continue
-                val cx = offX + (gw / 2f + o.x.toFloat() - camX.toFloat()) * scale
-                val cy = offY + (gh / 2f - o.y.toFloat() + camY.toFloat()) * scale
-                c.save()
-                c.translate(cx, cy)
-                c.rotate(-o.rot.toFloat())
-                val txt = o.text
-                val img = o.images.getOrNull(o.imageIx)
-                if (txt != null) {
-                    paint.color = android.graphics.Color.rgb(o.r, o.g, o.b)
-                    paint.alpha = ((o.alpha.coerceIn(0, 100)) * 255 / 100)
-                    paint.textSize = maxOf(1f, o.size.toFloat() * scale)
-                    paint.textAlign = android.graphics.Paint.Align.CENTER
-                    val base = -(paint.descent() + paint.ascent()) / 2f
-                    c.drawText(txt, 0f, base, paint)
-                } else if (img != null) {
-                    paint.alpha = ((o.alpha.coerceIn(0, 100)) * 255 / 100)
-                    val b = toBitmap(img)
-                    val s = o.size / b.width.toDouble() * scale
-                    val w = (b.width * s).toFloat()
-                    val h = (b.height * s).toFloat()
-                    val dst = android.graphics.RectF(-w / 2, -h / 2, w / 2, h / 2)
-                    c.drawBitmap(b, null, dst, paint)
-                } else {
-                    paint.color = android.graphics.Color.rgb(o.r, o.g, o.b)
-                    paint.alpha = ((o.alpha.coerceIn(0, 100)) * 255 / 100)
-                    paint.style = android.graphics.Paint.Style.FILL
-                    val s = o.size.toFloat() * scale
-                    if (o.circle) c.drawCircle(0f, 0f, s / 2f, paint)
-                    else c.drawRect(-s / 2f, -s / 2f, s / 2f, s / 2f, paint)
-                }
-                c.restore()
-            }
-            for (l in f.labels) {
-                paint.color = android.graphics.Color.rgb(l.r, l.g, l.b)
-                paint.alpha = ((l.alpha.coerceIn(0, 100)) * 255 / 100)
-                paint.textSize = maxOf(1f, l.size.toFloat() * scale)
-                paint.textAlign = android.graphics.Paint.Align.CENTER
-                val base = -(paint.descent() + paint.ascent()) / 2f
-                c.drawText(
-                    l.text,
-                    offX + (gw / 2f + l.x.toFloat()) * scale,
-                    offY + (gh / 2f - l.y.toFloat()) * scale + base,
-                    paint
-                )
-            }
-        }
+        game?.postFrame(frame)
     }
 }
 

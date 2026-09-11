@@ -386,8 +386,8 @@ class DesktopPlatform : NcodePlatform {
     override val files: NcodeFiles = DesktopFiles()
     override val clock: NcodeClock = DesktopClock()
     override val console: NcodeConsole = DesktopConsole()
-    override val sound: NcodeSound = DesktopSound()
-    override val gfx: NcodeGfx = DesktopGfx()
+    override val sound: NcodeSound = GdxJvmSound()
+    override val gfx: NcodeGfx = GdxDesktopGfx()
     override val assets: NcodeAssets = DesktopAssets()
 }
 
@@ -422,259 +422,6 @@ class DesktopAssets : NcodeAssets {
         val img = GfxImage(w, h, px)
         cache[canon] = img
         return canon to img
-    }
-}
-
-private val enToRu: Map<String, String> = ruKeys.entries.associate { (k, v) -> v to k }
-
-class DesktopGfx : NcodeGfx {
-    private var frame: javax.swing.JFrame? = null
-    private var panel: javax.swing.JPanel? = null
-    private var last: GfxFrame? = null
-    private var pw = 800
-    private var ph = 600
-    private var wantResizable = false
-    @Volatile private var camX = 0.0
-    @Volatile private var camY = 0.0
-    private val imgCache = mutableMapOf<GfxImage, java.awt.image.BufferedImage>()
-
-    override fun setCamera(x: Double, y: Double) {
-        camX = x
-        camY = y
-        panel?.repaint()
-    }
-
-    override fun setResizable(resizable: Boolean) {
-        wantResizable = resizable
-        val f = frame
-        if (f != null) {
-            try {
-                if (javax.swing.SwingUtilities.isEventDispatchThread()) f.isResizable = resizable
-                else javax.swing.SwingUtilities.invokeLater { try { f.isResizable = resizable } catch (_: Exception) {} }
-            } catch (_: Exception) {}
-        }
-    }
-
-    override fun isOpen(): Boolean {
-        val f = frame
-        return f != null && f.isDisplayable
-    }
-
-    override fun closeWindow() {
-        frame?.dispose()
-    }
-
-    private fun toBuffered(img: GfxImage): java.awt.image.BufferedImage {
-        imgCache[img]?.let { return it }
-        val b = java.awt.image.BufferedImage(img.w, img.h, java.awt.image.BufferedImage.TYPE_INT_ARGB)
-        b.setRGB(0, 0, img.w, img.h, img.pixels, 0, img.w)
-        imgCache[img] = b
-        return b
-    }
-
-    private fun drawLabel(g: java.awt.Graphics2D, txt: String, size: Double, r: Int, gg: Int, b: Int, alpha: Int) {
-        val savedC = g.composite
-        g.composite = java.awt.AlphaComposite.getInstance(java.awt.AlphaComposite.SRC_OVER, (alpha / 100f).coerceIn(0f, 1f))
-        g.color = java.awt.Color(r, gg, b)
-        g.font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, maxOf(1, size.toInt()))
-        val fm = g.getFontMetrics(g.font)
-        val tw = fm.stringWidth(txt)
-        val th = fm.ascent + fm.descent
-        g.drawString(txt, -tw / 2, -th / 2 + fm.ascent)
-        g.composite = savedC
-    }
-
-    private fun viewSize(): Pair<Int, Int> {
-        val p = panel
-        if (p != null && p.width > 0 && p.height > 0) return p.width to p.height
-        return pw to ph
-    }
-
-    private fun calcScale(): Triple<Double, Double, Double> {
-        val (vw, vh) = viewSize()
-        if (pw <= 0 || ph <= 0) return Triple(1.0, 0.0, 0.0)
-        val s = minOf(vw / pw.toDouble(), vh / ph.toDouble())
-        if (s.isNaN() || s.isInfinite() || s <= 0.0) return Triple(1.0, 0.0, 0.0)
-        val ox = (vw - pw * s) / 2.0
-        val oy = (vh - ph * s) / 2.0
-        return Triple(s, ox, oy)
-    }
-
-    private fun toWorld(ex: Int, ey: Int): Pair<Double, Double> {
-        val (s, ox, oy) = calcScale()
-        val wx = (ex - ox) / s - pw / 2.0 + camX
-        val wy = ph / 2.0 - (ey - oy) / s + camY
-        return wx to wy
-    }
-
-    private fun paintScene(g: java.awt.Graphics2D) {
-        g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
-        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-        g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY)
-        val (vw, vh) = viewSize()
-        val (scale, offX, offY) = calcScale()
-        // Чёрные поля вокруг игровой зоны (letterbox), чтобы не было искажений
-        g.color = java.awt.Color.BLACK
-        g.fillRect(0, 0, vw, vh)
-        val f = last
-        if (f == null) {
-            return
-        }
-        // Игровая зона в логических координатах pw x ph, по центру
-        g.color = java.awt.Color(f.bgR, f.bgG, f.bgB)
-        g.fillRect(offX.toInt(), offY.toInt(), (pw * scale + 0.999).toInt(), (ph * scale + 0.999).toInt())
-        for (t in f.pens) {
-            g.color = java.awt.Color(t.r, t.g, t.b)
-            g.stroke = java.awt.BasicStroke(maxOf(1f, (t.size * scale).toFloat()))
-            g.drawLine(
-                (offX + (pw / 2.0 + t.x1 - camX) * scale).toInt(),
-                (offY + (ph / 2.0 - t.y1 + camY) * scale).toInt(),
-                (offX + (pw / 2.0 + t.x2 - camX) * scale).toInt(),
-                (offY + (ph / 2.0 - t.y2 + camY) * scale).toInt()
-            )
-        }
-        g.stroke = java.awt.BasicStroke(1f)
-        for (o in f.objs) {
-            if (!o.visible) continue
-            val cx = offX + (pw / 2.0 + o.x - camX) * scale
-            val cy = offY + (ph / 2.0 - o.y + camY) * scale
-            val savedT = g.transform
-            val savedC = g.composite
-            g.translate(cx, cy)
-            g.scale(scale, scale)
-            g.rotate(Math.toRadians(-o.rot))
-            g.composite = java.awt.AlphaComposite.getInstance(java.awt.AlphaComposite.SRC_OVER, (o.alpha / 100f).coerceIn(0f, 1f))
-            val img = o.images.getOrNull(o.imageIx)
-            val txt = o.text
-            if (txt != null) {
-                drawLabel(g, txt, o.size, o.r, o.g, o.b, o.alpha)
-            } else if (img != null) {
-                val b = toBuffered(img)
-                val s = o.size / b.width.toDouble()
-                val w = (b.width * s).toInt()
-                val h = (b.height * s).toInt()
-                g.drawImage(b, -w / 2, -h / 2, w, h, null)
-            } else {
-                g.color = java.awt.Color(o.r, o.g, o.b)
-                val s = o.size.toInt()
-                if (o.circle) g.fillOval(-s / 2, -s / 2, s, s)
-                else g.fillRect(-s / 2, -s / 2, s, s)
-            }
-            g.transform = savedT
-            g.composite = savedC
-        }
-        for (l in f.labels) {
-            val savedT = g.transform
-            val cx = offX + (pw / 2.0 + l.x) * scale
-            val cy = offY + (ph / 2.0 - l.y) * scale
-            g.translate(cx, cy)
-            g.scale(scale, scale)
-            drawLabel(g, l.text, l.size, l.r, l.g, l.b, l.alpha)
-            g.transform = savedT
-        }
-    }
-
-    private fun keyCands(e: java.awt.event.KeyEvent): MutableSet<String> {
-        val code = java.awt.event.KeyEvent.getKeyText(e.keyCode).lowercase(java.util.Locale.ROOT).replace(" ", "_")
-        val cands = mutableSetOf(code)
-        enToRu[code]?.let { cands.add(it) }
-        val ch = e.keyChar
-        if (ch != java.awt.event.KeyEvent.CHAR_UNDEFINED) {
-            cands.add(ch.toString().lowercase(java.util.Locale.ROOT))
-            ruKeys[ch.toString().lowercase(java.util.Locale.ROOT)]?.let { cands.add(it) }
-        }
-        return cands
-    }
-
-    override fun openWindow(w: Int, h: Int, title: String, sink: NcodeInputSink, onClose: () -> Unit) {
-        val alive = frame
-        if (alive != null && alive.isDisplayable) throw NcodeError("окно уже есть — сначала закрыть окно")
-        pw = w
-        ph = h
-        try {
-            javax.swing.SwingUtilities.invokeAndWait {
-                val f = javax.swing.JFrame(title)
-                f.isResizable = wantResizable
-                f.defaultCloseOperation = javax.swing.WindowConstants.DO_NOTHING_ON_CLOSE
-                f.addWindowListener(object : java.awt.event.WindowAdapter() {
-                    override fun windowClosing(e: java.awt.event.WindowEvent?) {
-                        onClose()
-                        f.dispose()
-                    }
-                })
-                val p = object : javax.swing.JPanel() {
-                    override fun paintComponent(gr: java.awt.Graphics) {
-                        super.paintComponent(gr)
-                        paintScene(gr as java.awt.Graphics2D)
-                    }
-                }
-                p.preferredSize = java.awt.Dimension(w, h)
-                p.isFocusable = true
-                p.setFocusTraversalKeysEnabled(false)
-                f.contentPane.add(p)
-                val keyAdapt = object : java.awt.event.KeyAdapter() {
-                    override fun keyPressed(e: java.awt.event.KeyEvent) {
-                        sink.keyDown(keyCands(e))
-                    }
-                    override fun keyReleased(e: java.awt.event.KeyEvent) {
-                        sink.keyUp(keyCands(e))
-                    }
-                    override fun keyTyped(e: java.awt.event.KeyEvent) {
-                        val c = e.keyChar
-                        if (c == java.awt.event.KeyEvent.CHAR_UNDEFINED || c.isLetterOrDigit() || c == ' ') return
-                        sink.keyPress(setOf(c.toString().lowercase(java.util.Locale.ROOT)))
-                    }
-                }
-                f.addKeyListener(keyAdapt)
-                p.addKeyListener(keyAdapt)
-                f.addWindowFocusListener(object : java.awt.event.WindowFocusListener {
-                    override fun windowGainedFocus(e: java.awt.event.WindowEvent?) {}
-                    override fun windowLostFocus(e: java.awt.event.WindowEvent?) {
-                        sink.focusLost()
-                    }
-                })
-                p.addMouseListener(object : java.awt.event.MouseAdapter() {
-                    override fun mousePressed(e: java.awt.event.MouseEvent) {
-                        p.requestFocusInWindow()
-                        val (wx, wy) = toWorld(e.x, e.y)
-                        sink.mouseDown(wx, wy)
-                    }
-                    override fun mouseReleased(e: java.awt.event.MouseEvent) {
-                        val (wx, wy) = toWorld(e.x, e.y)
-                        sink.mouseUp(wx, wy)
-                    }
-                })
-                p.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
-                    override fun mouseMoved(e: java.awt.event.MouseEvent) {
-                        val (wx, wy) = toWorld(e.x, e.y)
-                        sink.mouseMove(wx, wy)
-                    }
-                    override fun mouseDragged(e: java.awt.event.MouseEvent) {
-                        val (wx, wy) = toWorld(e.x, e.y)
-                        sink.mouseMove(wx, wy)
-                    }
-                })
-                p.addComponentListener(object : java.awt.event.ComponentAdapter() {
-                    override fun componentResized(e: java.awt.event.ComponentEvent?) {
-                        panel?.repaint()
-                    }
-                })
-                f.pack()
-                f.setLocationRelativeTo(null)
-                f.isVisible = true
-                f.toFront()
-                p.requestFocusInWindow()
-                frame = f
-                panel = p
-            }
-        } catch (e: Exception) {
-            throw NcodeError("окно не открылось")
-        }
-    }
-
-    override fun render(frame: GfxFrame) {
-        last = frame
-        panel?.repaint()
     }
 }
 
@@ -755,6 +502,7 @@ private val HELP = """
       играть музыку <путь> — фон по кругу (одна, новая сменяет старую), остановить музыку [путь],
       остановить/выключить звук|музыку <путь>, пауза/продолжить звук <путь>, задать громкость <число> для звука <путь>
       следить за объектом <имя> истина/ложь (можно 1/0, короче: следить <имя> <флаг>) — камера едет за объектом, ложь — назад в центр
+      задать темноту 0..100 — ночь на весь мир; создать свет <имя> x y, задать размер/цвет/силу/мерцание свету <имя>, показать/скрыть/удалить свет <имя>, привязать свет <имя> к объекту <цель> — лампы
       запустить <файл.ncode> [истина|ложь] — без флага/ложь: выполнить скрипт поверх сцены; истина: стереть сцену (переменные живы), остановить всех и начать другой скрипт
       идти/повернуть/плыть/двигать — движение; отскочить от края; создать клон/удалить — клоны
       чтобы <имя> ... вызвать <имя> — процедуры (конец не пишем); каждые <число> <единица> — таймер
@@ -845,36 +593,57 @@ fun main(args: Array<String>) {
         }
         if (probeCode != 0) kotlin.system.exitProcess(probeCode)
     }
-    val interp = NcodeInterpreter(DesktopPlatform())
+    val plat = DesktopPlatform()
+    val interp = NcodeInterpreter(plat)
     interp.dryRun = dry
     interp.checkLabel = relLabel(fileArg)
-    var code = 0
-    try {
-        val curSkips = try {
-            interp.loadHandlers(lines)
-        } catch (e: NcodeError) {
-            System.err.println("Ошибка: " + e.message)
-            kotlin.system.exitProcess(1)
-            return
+    if (dry) {
+        var code = 0
+        try {
+            val curSkips = try {
+                interp.loadHandlers(lines)
+            } catch (e: NcodeError) {
+                System.err.println("Ошибка: " + e.message)
+                kotlin.system.exitProcess(1)
+                return
+            }
+            interp.resetScripts(safeCanon(file))
+            code = interp.runLines(lines, 1, curSkips)
+            interp.warnStaticCycles(file, lines)
+            if (interp.checkHandlers() != 0) code = 1
+            if (interp.checkKeyHandlers() != 0) code = 1
+        } catch (e: BreakSignal) {
+            System.err.println("стоп — только внутри цикла")
+            code = 1
+        } catch (e: ContinueSignal) {
+            System.err.println("дальше — только внутри цикла")
+            code = 1
         }
-        interp.resetScripts(safeCanon(file))
-                code = interp.runLines(lines, 1, curSkips)
-                if (dry) {
-                    interp.warnStaticCycles(file, lines)
-                    if (interp.checkHandlers() != 0) code = 1
-                    if (interp.checkKeyHandlers() != 0) code = 1
-                }
-    } catch (e: BreakSignal) {
-        System.err.println("стоп — только внутри цикла")
-        code = 1
-    } catch (e: ContinueSignal) {
-        System.err.println("дальше — только внутри цикла")
-        code = 1
-    } catch (e: SceneStop) {
-        code = 0
+        if (code != 0) kotlin.system.exitProcess(code)
+        return
     }
-    if (code != 0) kotlin.system.exitProcess(code)
-    if (!dry) {
+    val t = Thread({
+        var code = 0
+        try {
+            val curSkips = try {
+                interp.loadHandlers(lines)
+            } catch (e: NcodeError) {
+                System.err.println("Ошибка: " + e.message)
+                kotlin.system.exitProcess(1)
+                return@Thread
+            }
+            interp.resetScripts(safeCanon(file))
+            code = interp.runLines(lines, 1, curSkips)
+        } catch (e: BreakSignal) {
+            System.err.println("стоп — только внутри цикла")
+            code = 1
+        } catch (e: ContinueSignal) {
+            System.err.println("дальше — только внутри цикла")
+            code = 1
+        } catch (e: SceneStop) {
+            code = 0
+        }
+        if (code != 0) kotlin.system.exitProcess(code)
         interp.warnNoWindowForInput()
         while (interp.isWindowOpen()) {
             interp.checkEvents()
@@ -884,5 +653,15 @@ fun main(args: Array<String>) {
                 break
             }
         }
+    }, "ncode-script")
+    t.start()
+    try {
+        t.join()
+    } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+    }
+    try {
+        (plat.gfx as? GdxDesktopGfx)?.exitApp()
+    } catch (e: Exception) {
     }
 }

@@ -32,4 +32,6 @@ android {
 dependencies {
     implementation(project(":shared"))
     implementation(files("../libs/jlayer.jar", "../libs/jorbis.jar", "../libs/jaad.jar"))
+    implementation("com.badlogicgames.gdx:gdx-backend-android:1.12.1")
+    implementation("com.badlogicgames.gdx:gdx-freetype:1.12.1")
 }
