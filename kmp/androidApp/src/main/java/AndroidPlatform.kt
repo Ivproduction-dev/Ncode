@@ -67,16 +67,34 @@ class AndroidConsole(private val act: Activity, private val show: (String) -> Un
     }
 }
 
-class AndroidFiles(private val root: File) : NcodeFiles {
+class AndroidFiles(private val ctx: android.content.Context, private val root: File) : NcodeFiles {
     private fun f(p: String) = File(root, p)
+    private fun clean(p: String) = p.replace('\\', '/').trimStart('/')
+    private fun readAsset(path: String): String? {
+        return try {
+            ctx.assets.open(clean(path)).bufferedReader(Charsets.UTF_8).readText()
+        } catch (e: Exception) {
+            null
+        }
+    }
+    private fun hasAsset(path: String): Boolean {
+        return try {
+            ctx.assets.open(clean(path)).close()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
     override fun readText(path: String): String {
         val file = f(path)
-        if (!file.isFile) throw NcodeError("нет файла `$path`")
-        return try {
-            file.readLines(Charsets.UTF_8).joinToString("\n")
-        } catch (e: Exception) {
-            throw NcodeError("не могу прочитать `$path`")
+        if (file.isFile) {
+            return try {
+                file.readLines(Charsets.UTF_8).joinToString("\n")
+            } catch (e: Exception) {
+                throw NcodeError("не могу прочитать `$path`")
+            }
         }
+        return readAsset(path) ?: throw NcodeError("нет файла `$path`")
     }
     override fun writeText(path: String, text: String) {
         try {
@@ -105,14 +123,14 @@ class AndroidFiles(private val root: File) : NcodeFiles {
     }
     override fun exists(path: String): Boolean {
         return try {
-            f(path).exists()
+            if (f(path).exists()) true else hasAsset(path)
         } catch (e: Exception) {
             false
         }
     }
     override fun isFile(path: String): Boolean {
         return try {
-            f(path).isFile
+            if (f(path).isFile) true else hasAsset(path)
         } catch (e: Exception) {
             false
         }
@@ -591,6 +609,15 @@ class AndroidGfx(
     override fun setResizable(resizable: Boolean) {
     }
 
+    @Volatile private var camX = 0.0
+    @Volatile private var camY = 0.0
+
+    override fun setCamera(x: Double, y: Double) {
+        camX = x
+        camY = y
+        view?.postInvalidate()
+    }
+
     inner class GameView(ctx: android.content.Context, val gw: Int, val gh: Int, val sink: NcodeInputSink) : android.view.View(ctx) {
         @Volatile private var frame: GfxFrame? = null
         private val imgCache = mutableMapOf<GfxImage, android.graphics.Bitmap>()
@@ -612,8 +639,8 @@ class AndroidGfx(
         }
 
         private fun toWorld(sx: Float, sy: Float): Pair<Double, Double> {
-            val wx = (sx - offX) / scale - gw / 2.0
-            val wy = gh / 2.0 - (sy - offY) / scale
+            val wx = (sx - offX) / scale - gw / 2.0 + camX
+            val wy = gh / 2.0 - (sy - offY) / scale + camY
             return wx to wy
         }
 
@@ -671,10 +698,10 @@ class AndroidGfx(
                 linePaint.color = android.graphics.Color.rgb(t.r, t.g, t.b)
                 linePaint.strokeWidth = maxOf(1f, t.size * scale)
                 c.drawLine(
-                    offX + (gw / 2f + t.x1.toFloat()) * scale,
-                    offY + (gh / 2f - t.y1.toFloat()) * scale,
-                    offX + (gw / 2f + t.x2.toFloat()) * scale,
-                    offY + (gh / 2f - t.y2.toFloat()) * scale,
+                    offX + (gw / 2f + t.x1.toFloat() - camX.toFloat()) * scale,
+                    offY + (gh / 2f - t.y1.toFloat() + camY.toFloat()) * scale,
+                    offX + (gw / 2f + t.x2.toFloat() - camX.toFloat()) * scale,
+                    offY + (gh / 2f - t.y2.toFloat() + camY.toFloat()) * scale,
                     linePaint
                 )
             }
@@ -682,8 +709,8 @@ class AndroidGfx(
             paint.isAntiAlias = true
             for (o in f.objs) {
                 if (!o.visible) continue
-                val cx = offX + (gw / 2f + o.x.toFloat()) * scale
-                val cy = offY + (gh / 2f - o.y.toFloat()) * scale
+                val cx = offX + (gw / 2f + o.x.toFloat() - camX.toFloat()) * scale
+                val cy = offY + (gh / 2f - o.y.toFloat() + camY.toFloat()) * scale
                 c.save()
                 c.translate(cx, cy)
                 c.rotate(-o.rot.toFloat())
@@ -789,7 +816,7 @@ class AndroidAssets(private val ctx: android.content.Context) : NcodeAssets {
 
 class AndroidPlatform(act: Activity, show: (String) -> Unit, showGame: (android.view.View) -> Unit, showConsole: () -> Unit) : NcodePlatform {
     private val appCtx = act.applicationContext
-    override val files: NcodeFiles = AndroidFiles(File(appCtx.filesDir, "ncode"))
+    override val files: NcodeFiles = AndroidFiles(appCtx, File(appCtx.filesDir, "ncode"))
     override val clock: NcodeClock = AndroidClock()
     override val console: NcodeConsole = AndroidConsole(act, show)
     override val sound: NcodeSound = AndroidSound(appCtx)

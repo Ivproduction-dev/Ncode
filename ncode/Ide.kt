@@ -14,10 +14,25 @@ import javax.swing.plaf.basic.BasicScrollBarUI
 import javax.swing.text.*
 import javax.swing.tree.*
 
+private fun stripCommentIde(s: String): String {
+    var inQ = false
+    var i = 0
+    while (i < s.length) {
+        val c = s[i]
+        if (c == '"') inQ = !inQ
+        if (!inQ) {
+            if (c == '#') return s.substring(0, i)
+            if (c == '/' && i + 1 < s.length && s[i + 1] == '/' && (i == 0 || s[i - 1] != ':')) return s.substring(0, i)
+        }
+        i++
+    }
+    return s
+}
+
 fun isGame2D(text: String): Boolean {
     for (raw in text.lines()) {
-        val t = raw.trim()
-        if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) continue
+        val t = stripCommentIde(raw).trim()
+        if (t.isEmpty()) continue
         val parts = t.split(Regex("\\s+"), limit = 3)
         if (parts.size < 2) continue
         val a = parts[0].lowercase()
@@ -490,6 +505,10 @@ class NcodeEditorTab(var file: File? = null) : JPanel(BorderLayout()) {
         pane.caretColor = IdeTheme.caret
         pane.selectionColor = IdeTheme.selection
         pane.border = EmptyBorder(6, 8, 6, 8)
+        pane.isFocusable = true
+        pane.focusTraversalKeysEnabled = false
+        pane.setFocusTraversalKeys(KeyboardFocusManager.FORWARD_TRAVERSAL_KEYS, java.util.Collections.emptySet())
+        pane.setFocusTraversalKeys(KeyboardFocusManager.BACKWARD_TRAVERSAL_KEYS, java.util.Collections.emptySet())
 
         scroll.border = BorderFactory.createEmptyBorder()
         scroll.viewport.background = IdeTheme.bgEditor
@@ -702,6 +721,56 @@ class NcodeEditorTab(var file: File? = null) : JPanel(BorderLayout()) {
                 hideGhost()
             }
         })
+        val im = pane.getInputMap(JComponent.WHEN_FOCUSED)
+        val imWin = pane.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+        val am = pane.actionMap
+        val defUp = am.get(DefaultEditorKit.upAction)
+        val defDown = am.get(DefaultEditorKit.downAction)
+        fun putBoth(ks: KeyStroke, name: String, act: javax.swing.AbstractAction) {
+            im.put(ks, name)
+            imWin.put(ks, name)
+            am.put(name, act)
+        }
+        putBoth(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, 0), "ghostTab", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent?) {
+                if (ghostPopup.isVisible) acceptGhost()
+                else {
+                    try { doc.insertString(pane.caretPosition, "    ", null) } catch (ex: Exception) {}
+                }
+            }
+        })
+        putBoth(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "ghostEsc", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent?) {
+                if (ghostPopup.isVisible) hideGhost()
+                else autoPopup.isVisible = false
+            }
+        })
+        putBoth(KeyStroke.getKeyStroke(KeyEvent.VK_UP, 0), "ghostUp", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent?) {
+                if (ghostPopup.isVisible) cycleGhost(-1)
+                else if (autoPopup.isVisible) autoList.selectedIndex = (autoList.selectedIndex - 1 + autoList.model.size) % autoList.model.size
+                else defUp?.actionPerformed(e)
+            }
+        })
+        putBoth(KeyStroke.getKeyStroke(KeyEvent.VK_DOWN, 0), "ghostDown", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent?) {
+                if (ghostPopup.isVisible) cycleGhost(1)
+                else if (autoPopup.isVisible) autoList.selectedIndex = (autoList.selectedIndex + 1) % autoList.model.size
+                else defDown?.actionPerformed(e)
+            }
+        })
+        val kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        kfm.addKeyEventDispatcher { e ->
+            if (e.id == KeyEvent.KEY_PRESSED && ghostPopup.isVisible) {
+                when (e.keyCode) {
+                    KeyEvent.VK_TAB -> { acceptGhost(); e.consume(); true }
+                    KeyEvent.VK_UP -> { cycleGhost(-1); e.consume(); true }
+                    KeyEvent.VK_DOWN -> { cycleGhost(1); e.consume(); true }
+                    KeyEvent.VK_ESCAPE -> { hideGhost(); e.consume(); true }
+                    else -> false
+                }
+            } else false
+        }
     }
 
     private fun renderGhost() {
@@ -910,11 +979,16 @@ class DarkTreeCellRenderer : DefaultTreeCellRenderer() {
     ): Component {
         val c = super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus)
         val node = value as? DefaultMutableTreeNode
-        val file = node?.userObject as? File
-        if (file != null) {
-            text = file.name
-        } else if (node?.userObject is String) {
-            text = node.userObject as String
+        val dictItem = node?.userObject as? DictItem
+        if (dictItem != null) {
+            text = dictItem.cmd
+        } else {
+            val file = node?.userObject as? File
+            if (file != null) {
+                text = file.name
+            } else if (node?.userObject is String) {
+                text = node.userObject as String
+            }
         }
         c.foreground = if (sel) IdeTheme.accent else IdeTheme.fgMain
         c.background = if (sel) IdeTheme.bgActive else IdeTheme.bgDeep
@@ -1050,10 +1124,13 @@ fun ideDictionary(): List<DictGroup> {
             DictItem("размер", listOf("задать размер 120 объекту герой")),
             DictItem("цвет", listOf("задать цвет красный объекту герой")),
             DictItem("образ", listOf("задать образ объекту герой 1.png")),
+            DictItem("текстура", listOf("задать текстуру офис.png объекту какашка")),
             DictItem("поворот", listOf("повернуть налево на 15 объекту герой")),
             DictItem("фон", listOf("задать фон белый")),
             DictItem("написать", listOf("написать табло привет")),
             DictItem("показать", listOf("скрыть герой", "показать герой")),
+            DictItem("следить", listOf("следить за объектом герой истина", "следить за объектом герой ложь")),
+            DictItem("запустить", listOf("запустить уровень2.ncode", "запустить меню.ncode истина")),
             DictItem("клон", listOf("создать клон герой"))
         )),
         DictGroup("Движение", listOf(
@@ -1066,6 +1143,8 @@ fun ideDictionary(): List<DictGroup> {
         )),
         DictGroup("Звук", listOf(
             DictItem("играть звук", listOf("играть звук 1.mp3", "играть звук и ждать 1.mp3")),
+            DictItem("играть музыку", listOf("играть музыку фон.mp3")),
+            DictItem("остановить музыку", listOf("остановить музыку")),
             DictItem("остановить звук", listOf("остановить звук 1.mp3")),
             DictItem("громкость", listOf("задать громкость 60 для звука 1.mp3"))
         )),
@@ -1077,6 +1156,14 @@ fun ideDictionary(): List<DictGroup> {
             DictItem("есть ли файл", listOf("если есть ли файл saves/очки.txt то вывести есть конец")),
             DictItem("создать папку", listOf("создать папку моисевы"))
         )),
+        DictGroup("Интернет", listOf(
+            DictItem("запрос", listOf("запрос гет https://example.com сохранить в ответ", "запрос пост https://httpbin.org/post данные привет сохранить в ответ")),
+            DictItem("код ответа", listOf("напечатать код ответа")),
+            DictItem("записать в базу", listOf("записать в базу https://моя-игра.firebaseio.com очки/рекорд 100")),
+            DictItem("создать в базе", listOf("создать в базе https://моя-игра.firebaseio.com очки/рекорд 100")),
+            DictItem("прочитать базу", listOf("прочитать базу https://моя-игра.firebaseio.com очки/рекорд сохранить в рекорд")),
+            DictItem("удалить из базы", listOf("удалить из базы https://моя-игра.firebaseio.com очки/рекорд"))
+        )),
         DictGroup("Формулы", listOf(
             DictItem("случайно", listOf("задать кубик случайно 1 6")),
             DictItem("время", listOf("задать старт время")),
@@ -1085,6 +1172,7 @@ fun ideDictionary(): List<DictGroup> {
         DictGroup("Ввод", listOf(
             DictItem("спросить", listOf("спросить Как зовут сохранить в имя")),
             DictItem("когда нажата клавиша", listOf("когда нажата клавиша пробел\nвывести прыг")),
+            DictItem("когда отпущена клавиша", listOf("когда отпущена клавиша a\nзадать скорость 0 0 объекту игрок", "когда отпущена пробел\nвывести отпустил")),
             DictItem("при нажатии", listOf("при нажатии\nвывести клик")),
             DictItem("ждать", listOf("ждать 2 секунды")),
             DictItem("напечатать", listOf("напечатать привет"))
@@ -1094,8 +1182,8 @@ fun ideDictionary(): List<DictGroup> {
 
 fun ideNextWords(first: String): List<String> {
     return when (first.lowercase()) {
-        "задать" -> listOf("прозрачность", "размер", "поворот", "цвет", "образ", "костюм", "форма", "слой", "скорость", "фон", "громкость")
-        "изменить", "поменять", "присвоить", "сделать" -> listOf("прозрачность", "размер", "поворот", "цвет", "образ", "костюм", "форма", "слой", "скорость", "фон", "громкость")
+        "задать" -> listOf("прозрачность", "размер", "поворот", "цвет", "образ", "текстуру", "костюм", "форма", "слой", "скорость", "фон", "громкость")
+        "изменить", "поменять", "присвоить", "сделать" -> listOf("прозрачность", "размер", "поворот", "цвет", "образ", "текстуру", "костюм", "форма", "слой", "скорость", "фон", "громкость")
         "создать" -> listOf("окно", "список", "клон", "папку")
         "показать" -> listOf("переменную")
         "скрыть" -> listOf("переменную")
@@ -1105,6 +1193,7 @@ fun ideNextWords(first: String): List<String> {
         "когда" -> listOf("нажата", "отпущена", "создан", "будет", "получено")
         "при" -> listOf("нажатии", "отпускании", "движении", "клике")
         "нажата" -> listOf("клавиша")
+        "отпущена", "отпущен", "отпущено" -> listOf("клавиша")
         "ждать" -> listOf("пока", "до")
         "свойство" -> listOf("х", "у", "размера", "ширины", "высоты", "прозрачности")
         "повтори", "повторить", "повторять" -> listOf("раз", "раза", "разов")

@@ -5,7 +5,11 @@ import android.os.Bundle
 import android.widget.FrameLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import ncode.BreakSignal
+import ncode.ContinueSignal
+import ncode.NcodeError
 import ncode.NcodeInterpreter
+import ncode.SceneStop
 
 class MainActivity : Activity() {
     private lateinit var tv: TextView
@@ -82,6 +86,7 @@ class MainActivity : Activity() {
                 val skips0 = probe.loadHandlers(lines)
                 probe.resetScripts(name)
                 var code = probe.runLines(lines, 1, skips0)
+                if (probe.checkHandlers() != 0) code = 1
                 if (probe.checkKeyHandlers() != 0) code = 1
                 if (code != 0) {
                     log("Ошибки проверки\n")
@@ -89,8 +94,23 @@ class MainActivity : Activity() {
                 }
                 val it = NcodeInterpreter(p)
                 it.resetScripts(name)
-                val skips = it.loadHandlers(lines)
-                code = it.runLines(lines, 1, skips)
+                val skips = try {
+                    it.loadHandlers(lines)
+                } catch (e: NcodeError) {
+                    log("Ошибка: " + (e.message ?: e.toString()) + "\n")
+                    return@Thread
+                }
+                code = try {
+                    it.runLines(lines, 1, skips)
+                } catch (e: SceneStop) {
+                    0
+                } catch (e: BreakSignal) {
+                    log("стоп — только внутри цикла\n")
+                    1
+                } catch (e: ContinueSignal) {
+                    log("дальше — только внутри цикла\n")
+                    1
+                }
                 if (code != 0) {
                     log("Готово с ошибками\n")
                     return@Thread

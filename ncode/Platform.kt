@@ -129,4 +129,5 @@ interface NcodeGfx {
     fun isOpen(): Boolean
     fun render(frame: GfxFrame)
     fun setResizable(resizable: Boolean)
+    fun setCamera(x: Double, y: Double)
 }

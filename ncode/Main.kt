@@ -100,8 +100,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             val skip = skips.firstOrNull { i in it }
             if (skip != null) { i = skip.last + 1; continue }
             val rawLine = lines[i]
-            val line = rawLine.trim()
-            if (line.isEmpty() || line.startsWith("#") || line.startsWith("//")) { i++; continue }
+            val line = stripComment(rawLine).trim()
+            if (line.isEmpty()) { i++; continue }
             try {
                 if (startsKw(line, "если", "эсли")) {
                     i = runIf(lines, i, base)
@@ -149,6 +149,12 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     private val cloneHandlers = mutableListOf<CloneHandler>()
     private val procHandlers = mutableListOf<ProcHandler>()
     private val timerHandlers = mutableListOf<TimerH>()
+    private data class CollHandler(val a: String, val b: String, val lines: List<String>, val base: Int)
+    private data class TrigHandler(val a: String, val b: String, val lines: List<String>, val base: Int)
+    private val collHandlers = mutableListOf<CollHandler>()
+    private val trigHandlers = mutableListOf<TrigHandler>()
+    private val collLast = mutableMapOf<String, Boolean>()
+    private val trigLast = mutableMapOf<String, Boolean>()
     private val cloneCount = mutableMapOf<String, Int>()
     private var procDepth = 0
 
@@ -199,21 +205,21 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
 
     private fun keyHeader(t: String): String? {
         val parts = t.trim().split(Regex("\\s+"))
-        if (parts.size != 4) return null
         if (parts[0].lowercase(java.util.Locale.ROOT) != "когда") return null
         if (parts[1].lowercase(java.util.Locale.ROOT) != "нажата") return null
-        if (parts[2].lowercase(java.util.Locale.ROOT) != "клавиша") return null
-        return parts[3]
+        if (parts.size == 4 && parts[2].lowercase(java.util.Locale.ROOT) == "клавиша") return parts[3]
+        if (parts.size == 3 && parts[2].lowercase(java.util.Locale.ROOT) != "клавиша") return parts[2]
+        return null
     }
 
     private fun keyUpHeader(t: String): String? {
         val parts = t.trim().split(Regex("\\s+"))
-        if (parts.size != 4) return null
         if (parts[0].lowercase(java.util.Locale.ROOT) != "когда") return null
         val second = parts[1].lowercase(java.util.Locale.ROOT)
         if (second != "отпущена" && second != "отпущен" && second != "отпущено") return null
-        if (parts[2].lowercase(java.util.Locale.ROOT) != "клавиша") return null
-        return parts[3]
+        if (parts.size == 4 && parts[2].lowercase(java.util.Locale.ROOT) == "клавиша") return parts[3]
+        if (parts.size == 3 && parts[2].lowercase(java.util.Locale.ROOT) != "клавиша") return parts[2]
+        return null
     }
 
     private fun cloneHeader(t: String): String? {
@@ -235,6 +241,16 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     private fun timerHeader(t: String): Boolean {
         val parts = t.trim().split(Regex("\\s+"), limit = 2)
         return parts[0].lowercase(java.util.Locale.ROOT) == "каждые"
+    }
+
+    private fun collHeader(t: String): Pair<String, String>? {
+        val m = Regex("^когда\\s+происходит\\s+столкновение\\s+(\\S+)\\s+и\\s+(\\S+)\\s*$", RegexOption.IGNORE_CASE).find(t.trim()) ?: return null
+        return m.groupValues[1].lowercase(java.util.Locale.ROOT) to m.groupValues[2].lowercase(java.util.Locale.ROOT)
+    }
+
+    private fun trigHeader(t: String): Pair<String, String>? {
+        val m = Regex("^когда\\s+объект\\s+(\\S+)\\s+входит\\s+в\\s+триггер\\s+(\\S+)\\s*$", RegexOption.IGNORE_CASE).find(t.trim()) ?: return null
+        return m.groupValues[1].lowercase(java.util.Locale.ROOT) to m.groupValues[2].lowercase(java.util.Locale.ROOT)
     }
 
     private fun mouseTarget(t: String): String? {
@@ -279,31 +295,31 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     private var broadcastDepth = 0
 
     private fun isHeader(t: String): Boolean {
-        return handlerMsg(t) != null || keyHeader(t) != null || keyUpHeader(t) != null || cloneHeader(t) != null || procHeader(t) != null || timerHeader(t) || mouseHeader(t)
+        return handlerMsg(t) != null || keyHeader(t) != null || keyUpHeader(t) != null || cloneHeader(t) != null || procHeader(t) != null || timerHeader(t) || mouseHeader(t) || collHeader(t) != null || trigHeader(t) != null
     }
 
     private fun dropTailEnd(body: MutableList<String>) {
         var k = body.size - 1
         while (k >= 0) {
-            val lt = body[k].trim()
-            if (lt.isEmpty() || lt.startsWith("#") || lt.startsWith("//")) { k--; continue }
+            val lt = stripComment(body[k]).trim()
+            if (lt.isEmpty()) { k--; continue }
             break
         }
-        if (k >= 0 && body[k].trim().lowercase(java.util.Locale.ROOT) == "конец") body.removeAt(k)
+        if (k >= 0 && stripComment(body[k]).trim().lowercase(java.util.Locale.ROOT) == "конец") body.removeAt(k)
     }
 
     fun extractHandlers(lines: List<String>): List<IntRange> {
         val skips = mutableListOf<IntRange>()
         var i = 0
         while (i < lines.size) {
-            val t = lines[i].trim()
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            val t = stripComment(lines[i]).trim()
+            if (t.isEmpty()) { i++; continue }
             val key = keyHeader(t)
             if (key != null) {
                 val start = i
                 i++
                 val body = mutableListOf<String>()
-                while (i < lines.size && !isHeader(lines[i].trim())) {
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
                     body.add(lines[i])
                     i++
                 }
@@ -317,7 +333,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 val start = i
                 i++
                 val body = mutableListOf<String>()
-                while (i < lines.size && !isHeader(lines[i].trim())) {
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
                     body.add(lines[i])
                     i++
                 }
@@ -331,7 +347,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 val start = i
                 i++
                 val body = mutableListOf<String>()
-                while (i < lines.size && !isHeader(lines[i].trim())) {
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
                     body.add(lines[i])
                     i++
                 }
@@ -343,11 +359,10 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             val proc = procHeader(t)
             if (proc != null) {
                 if (!nameRegex.matches(proc)) throw NcodeError("строка ${i + 1}: плохое имя `$proc`")
-                if (proc.lowercase(java.util.Locale.ROOT) in reserved) throw NcodeError("строка ${i + 1}: `$proc` — служебное слово")
                 val start = i
                 i++
                 val body = mutableListOf<String>()
-                while (i < lines.size && !isHeader(lines[i].trim())) {
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
                     body.add(lines[i])
                     i++
                 }
@@ -362,7 +377,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 if (tail.isEmpty()) throw NcodeError("строка ${i + 1}: нужно: каждые <число> <секунды|минуты|часы>")
                 i++
                 val body = mutableListOf<String>()
-                while (i < lines.size && !isHeader(lines[i].trim())) {
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
                     body.add(lines[i])
                     i++
                 }
@@ -370,6 +385,34 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 val cut = tail.indexOfLast { it.isWhitespace() }
                 if (cut < 0) throw NcodeError("строка ${i + 1}: нужно: каждые <число> <секунды|минуты|часы>")
                 timerHandlers.add(TimerH(tail.substring(0, cut).trim(), tail.substring(cut).trim(), 0, 0, false, body, start + 2))
+                skips.add(start..i - 1)
+                continue
+            }
+            val coll = collHeader(t)
+            if (coll != null) {
+                val start = i
+                i++
+                val body = mutableListOf<String>()
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
+                    body.add(lines[i])
+                    i++
+                }
+                dropTailEnd(body)
+                collHandlers.add(CollHandler(coll.first, coll.second, body, start + 2))
+                skips.add(start..i - 1)
+                continue
+            }
+            val trig = trigHeader(t)
+            if (trig != null) {
+                val start = i
+                i++
+                val body = mutableListOf<String>()
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
+                    body.add(lines[i])
+                    i++
+                }
+                dropTailEnd(body)
+                trigHandlers.add(TrigHandler(trig.first, trig.second, body, start + 2))
                 skips.add(start..i - 1)
                 continue
             }
@@ -383,7 +426,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 }
                 i++
                 val body = mutableListOf<String>()
-                while (i < lines.size && !isHeader(lines[i].trim())) {
+                while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
                     body.add(lines[i])
                     i++
                 }
@@ -398,7 +441,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             val start = i
             i++
             val body = mutableListOf<String>()
-            while (i < lines.size && !isHeader(lines[i].trim())) {
+            while (i < lines.size && !isHeader(stripComment(lines[i]).trim())) {
                 body.add(lines[i])
                 i++
             }
@@ -416,6 +459,10 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         cloneHandlers.clear()
         procHandlers.clear()
         timerHandlers.clear()
+        collHandlers.clear()
+        trigHandlers.clear()
+        collLast.clear()
+        trigLast.clear()
         cloneCount.clear()
         mouseHandlers.clear()
         kakListeners.clear()
@@ -518,8 +565,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             if (want.isEmpty() || !nameRegex.matches(want)) continue
             var depth = 0
             for ((idx, raw) in h.lines.withIndex()) {
-                val t = raw.trim()
-                if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) continue
+                val t = stripComment(raw).trim()
+                if (t.isEmpty()) continue
                 if ((startsKw(t, "если", "эсли", "повтори", "повторить", "повторять", "пока", "покуда", "повторяй", "всегда") || startsKakTolko(t)) && matchEnd(t) < 0) {
                     depth++
                     continue
@@ -600,14 +647,14 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     private fun collectIf(lines: List<String>, start: Int): Pair<String, Int> {
-        var acc = lines[start].trim()
+        var acc = stripComment(lines[start]).trim()
         var idx = start
         var endPos = matchEnd(acc)
         while (endPos < 0) {
             idx++
             if (idx >= lines.size) throw NcodeError("нет `конец` для `если`")
-            val t = lines[idx].trim()
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) continue
+            val t = stripComment(lines[idx]).trim()
+            if (t.isEmpty()) continue
             acc += " $t"
             endPos = matchEnd(acc)
         }
@@ -636,7 +683,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     private fun runIf(lines: List<String>, start: Int, base: Int): Int {
-        val first = lines[start].trim()
+        val first = stripComment(lines[start]).trim()
         val end = matchEnd(first)
         if (end >= 0) {
             if (first.substring(end).trim().isNotEmpty())
@@ -678,7 +725,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         val branches = mutableListOf<Branch>()
         val elseCmds = mutableListOf<BlockItem>()
         var hasElse = false
-        val (cond, trail) = splitHeader(lines[start])
+        val (cond, trail) = splitHeader(stripComment(lines[start]).trim())
         if (trailHasBranchKw(trail))
             throw NcodeError("в многострочном `если` команда — с новой строки")
         branches.add(Branch(cond, base + start))
@@ -689,11 +736,11 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         var closed = false
         while (i < lines.size) {
             val raw = lines[i]
-            val t = raw.trim()
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            val t = stripComment(raw).trim()
+            if (t.isEmpty()) { i++; continue }
             if (startsKw(t, "иначеесли")) {
                 if (inElse) throw NcodeError("`иначеесли` после `иначе` — нельзя")
-                val (c2, tr2) = splitHeader(raw)
+                val (c2, tr2) = splitHeader(t)
                 if (trailHasBranchKw(tr2))
                     throw NcodeError("в многострочном `если` команда — с новой строки")
                 branches.add(Branch(c2, base + i))
@@ -723,8 +770,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 while (matchEnd(acc) < 0) {
                     j++
                     if (j >= lines.size) throw NcodeError("нет `конец` для вложенного блока")
-                    val tj = lines[j].trim()
-                    if (tj.isEmpty() || tj.startsWith("#") || tj.startsWith("//")) continue
+                    val tj = stripComment(lines[j]).trim()
+                    if (tj.isEmpty()) continue
                     sub.add(lines[j])
                     acc += " $tj"
                 }
@@ -786,7 +833,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     private val razWords = setOf("раз", "раза", "разов")
 
     private fun runRepeat(lines: List<String>, start: Int, base: Int): Int {
-        val first = lines[start].trim()
+        val first = stripComment(lines[start]).trim()
         val end = matchEnd(first)
         if (end >= 0) {
             if (first.substring(end).trim().isNotEmpty())
@@ -874,7 +921,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     private fun runKakTolko(lines: List<String>, start: Int, base: Int): Int {
-        val first = lines[start].trim()
+        val first = stripComment(lines[start]).trim()
         val end = matchEnd(first)
         if (end >= 0) {
             if (first.substring(end).trim().isNotEmpty())
@@ -925,7 +972,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     private fun parseKakBlock(lines: List<String>, start: Int, base: Int): Int {
-        val t0 = lines[start].trim()
+        val t0 = stripComment(lines[start]).trim()
         var j = 0
         var seen = 0
         while (seen < 2 && j < t0.length) {
@@ -959,8 +1006,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         var closed = false
         while (i < lines.size) {
             val raw = lines[i]
-            val t = raw.trim()
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            val t = stripComment(raw).trim()
+            if (t.isEmpty()) { i++; continue }
             if (startsKw(t, "иначе", "иначеесли"))
                 throw NcodeError("тут нет `иначе` — только условие и команды")
             if (startsKw(t, "конец")) {
@@ -975,8 +1022,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 while (matchEnd(acc) < 0) {
                     k++
                     if (k >= lines.size) throw NcodeError("нет `конец` для вложенного блока")
-                    val tk = lines[k].trim()
-                    if (tk.isEmpty() || tk.startsWith("#") || tk.startsWith("//")) continue
+                    val tk = stripComment(lines[k]).trim()
+                    if (tk.isEmpty()) continue
                     sub.add(lines[k])
                     acc += " $tk"
                 }
@@ -1031,6 +1078,12 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 code = 1
                 continue
             }
+            if (runLines(h.lines, h.base) != 0) code = 1
+        }
+        for (h in collHandlers) {
+            if (runLines(h.lines, h.base) != 0) code = 1
+        }
+        for (h in trigHandlers) {
             if (runLines(h.lines, h.base) != 0) code = 1
         }
         for (h in mouseHandlers) {
@@ -1142,6 +1195,33 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 }
             }
         }
+        for (h in collHandlers.toList()) {
+            val key = h.a + "|" + h.b
+            val now = try { touches(h.a, h.b) } catch (e: NcodeError) { false }
+            val was = collLast[key] ?: false
+            if (now && !was) {
+                val b = try { objBox(h.a) } catch (e: Exception) { null }
+                if (b != null) {
+                    lastCollX = (b[0] + b[1]) / 2
+                    lastCollY = (b[2] + b[3]) / 2
+                }
+                val aObj = try { synchronized(gfxLock) { gfxObjs.find { it.name == h.a } } } catch (e: Exception) { null }
+                if (aObj != null) aObj.lastHit = Math.hypot(aObj.vx, aObj.vy)
+                if (runLines(h.lines, h.base) != 0) execFailed = true
+            }
+            collLast[key] = now
+        }
+        for (h in trigHandlers.toList()) {
+            val key = h.a + "|" + h.b
+            val isTrig = try { synchronized(gfxLock) { gfxObjs.find { it.name == h.b }?.isTrigger } ?: false } catch (e: Exception) { false }
+            val now = if (!isTrig) false else try { touches(h.a, h.b) } catch (e: NcodeError) { false }
+            val was = trigLast[key] ?: false
+            if (now && !was) {
+                if (runLines(h.lines, h.base) != 0) execFailed = true
+            }
+            trigLast[key] = now
+        }
+        physicsStep()
         val clicks = synchronized(mouseQueue) {
             val got = mouseQueue.toList()
             mouseQueue.clear()
@@ -1225,6 +1305,35 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         return doubleArrayOf(o.x - ex, o.x + ex, o.y - ey, o.y + ey)
     }
 
+    private fun physHalf(o: GObj): DoubleArray {
+        if (o.colType == 1 && o.colR > 0) {
+            return doubleArrayOf(o.colR, o.colR, o.colDx, o.colDy)
+        }
+        if (o.colW > 0 && o.colH > 0) {
+            return doubleArrayOf(o.colW / 2.0, o.colH / 2.0, o.colDx, o.colDy)
+        }
+        val img = o.costumes.getOrNull(o.costume)
+        if (img != null) {
+            val s = o.size / img.w.toDouble()
+            return doubleArrayOf(img.w * s / 2.0, img.h * s / 2.0, 0.0, 0.0)
+        }
+        return doubleArrayOf(o.size / 2.0, o.size / 2.0, 0.0, 0.0)
+    }
+
+    private fun physBoxOf(o: GObj): DoubleArray {
+        val h = physHalf(o)
+        val cx = o.x + h[2]
+        val cy = o.y + h[3]
+        return doubleArrayOf(cx - h[0], cx + h[0], cy - h[1], cy + h[1])
+    }
+
+    private fun physBox(name: String): DoubleArray? {
+        val o = synchronized(gfxLock) {
+            gfxObjs.find { it.name == name }?.copy()
+        } ?: return null
+        return physBoxOf(o)
+    }
+
     private fun touches(a: String, b: String): Boolean {
         val vis = synchronized(gfxLock) {
             val oa = gfxObjs.find { it.name == a } ?: throw NcodeError("объект не нарисован")
@@ -1232,8 +1341,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             oa.visible && ob.visible
         }
         if (!vis) return false
-        val ba = objBox(a) ?: throw NcodeError("объект не нарисован")
-        val bb = objBox(b) ?: throw NcodeError("объект не нарисован")
+        val ba = physBox(a) ?: throw NcodeError("объект не нарисован")
+        val bb = physBox(b) ?: throw NcodeError("объект не нарисован")
         return ba[0] <= bb[1] && bb[0] <= ba[1] && ba[2] <= bb[3] && bb[2] <= ba[3]
     }
 
@@ -1243,7 +1352,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         }
         if (!vis) return false
         val b = objBox(name) ?: throw NcodeError("объект не нарисован")
-        return b[0] <= -gfxW / 2.0 || b[1] >= gfxW / 2.0 || b[2] <= -gfxH / 2.0 || b[3] >= gfxH / 2.0
+        return b[0] <= -gfxW / 2.0 + camX || b[1] >= gfxW / 2.0 + camX || b[2] <= -gfxH / 2.0 + camY || b[3] >= gfxH / 2.0 + camY
     }
 
     private fun distObjs(a: String, b: String): Double {
@@ -1255,6 +1364,145 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         val dx = p[0] - p[2]
         val dy = p[1] - p[3]
         return kotlin.math.sqrt(dx * dx + dy * dy)
+    }
+
+    private fun resolveStatic(name: String) {
+        val dyn = synchronized(gfxLock) { gfxObjs.find { it.name == name } } ?: return
+        if (dyn.bodyType != 0) return
+        if (dyn.isTrigger) return
+        val statics = synchronized(gfxLock) { gfxObjs.filter { it.bodyType != 0 && !it.isTrigger && it.name != name }.map { it.copy() } }
+        for (st in statics) {
+            if (!touches(name, st.name)) continue
+            val a = physBox(name) ?: continue
+            val b = physBox(st.name) ?: continue
+            val overlapX = minOf(a[1], b[1]) - maxOf(a[0], b[0])
+            val overlapY = minOf(a[3], b[3]) - maxOf(a[2], b[2])
+            if (overlapX <= 0 || overlapY <= 0) continue
+            synchronized(gfxLock) {
+                val o = gfxObjs.find { it.name == name } ?: return
+                val impact = Math.hypot(o.vx, o.vy)
+                if (overlapX < overlapY) {
+                    if (o.x < st.x) o.x -= overlapX else o.x += overlapX
+                    o.vx = -o.vx * o.rest
+                    if (kotlin.math.abs(o.vx) < 1.0) o.vx = 0.0
+                } else {
+                    val landed = o.y > st.y
+                    if (o.y < st.y) o.y -= overlapY else o.y += overlapY
+                    o.vy = -o.vy * o.rest
+                    if (kotlin.math.abs(o.vy) < 1.0) o.vy = 0.0
+                    if (landed && o.vy == 0.0) {
+                        o.vx *= (1.0 - kotlin.math.min(0.3, o.fric * 0.1)).coerceIn(0.0, 1.0)
+                        if (kotlin.math.abs(o.vx) < 1.0 && o.fric > 0) o.vx = 0.0
+                    }
+                }
+                lastCollX = (maxOf(a[0], b[0]) + minOf(a[1], b[1])) / 2
+                lastCollY = (maxOf(a[2], b[2]) + minOf(a[3], b[3])) / 2
+                o.lastHit = impact
+            }
+        }
+    }
+
+    private fun isOnGround(name: String): Boolean {
+        val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: return false
+        if (o.bodyType == 1) return false
+        if (o.isTrigger) return false
+        val a = physBox(name) ?: return false
+        val eps = 3.0
+        val feetY = a[2]
+        val checks = synchronized(gfxLock) { gfxObjs.filter { it.bodyType != 0 && !it.isTrigger && it.name != name }.map { it.copy() } }
+        for (st in checks) {
+            val b = physBox(st.name) ?: continue
+            if (Math.abs(feetY - b[3]) < eps && a[0] < b[1] - 1.0 && a[1] > b[0] + 1.0) return true
+        }
+        return false
+    }
+
+    private var lastPhys = 0L
+    private fun physicsStep() {
+        if (dryRun) return
+        if (!platform.gfx.isOpen()) return
+        val now = platform.clock.nanoTime()
+        if (lastPhys == 0L) { lastPhys = now; return }
+        var dt = (now - lastPhys).toDouble() / 1e9
+        lastPhys = now
+        if (dt <= 0 || dt > 0.2) dt = 0.016
+        val toUpdate = synchronized(gfxLock) { gfxObjs.filter { it.bodyType == 0 }.map { it.name } }
+        for (nm in toUpdate) {
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == nm } } ?: continue
+            if (o.bodyType != 0) continue
+            o.vx += gravX * 100.0 * o.gravScale * dt
+            o.vy += gravY * 100.0 * o.gravScale * dt
+            o.vx *= (1.0 - (airDens + o.linDamp) * dt).coerceIn(0.0, 1.0)
+            o.vy *= (1.0 - (airDens + o.linDamp) * dt).coerceIn(0.0, 1.0)
+            o.av *= (1.0 - o.angDamp * dt).coerceIn(0.0, 1.0)
+            if (o.fixedRot) o.av = 0.0
+            val dist = Math.hypot(o.vx * dt, o.vy * dt)
+            val half = physHalf(o)
+            val minHalf = kotlin.math.max(2.0, kotlin.math.min(half[0], half[1]))
+            val maxStep = if (o.bullet) 2.0 else 8.0
+            var n = kotlin.math.ceil(dist / kotlin.math.min(minHalf, maxStep)).toInt()
+            if (n < 1) n = 1
+            if (n > 16) n = 16
+            var moved = false
+            var k = 0
+            while (k < n) {
+                val sx = o.vx * dt / n
+                val sy = o.vy * dt / n
+                if (sx == 0.0 && sy == 0.0) break
+                val nx = o.x + sx
+                val ny = o.y + sy
+                if (o.penDown) {
+                    synchronized(gfxLock) { penLines.add(PenSeg(o.x, o.y, nx, ny, o.penR, o.penG, o.penB, o.penSize)) }
+                }
+                o.x = nx
+                o.y = ny
+                moved = true
+                if (!o.fixedRot && o.av != 0.0) o.rot = (o.rot + o.av * dt / n) % 360
+                resolveStatic(nm)
+                if (o.vx == 0.0 && o.vy == 0.0) break
+                k++
+            }
+            if (!moved && !o.fixedRot && o.av != 0.0) {
+                o.rot = (o.rot + o.av * dt) % 360
+            }
+        }
+        for (j in joints.values.toList()) {
+            val a = synchronized(gfxLock) { gfxObjs.find { it.name == j.a } } ?: continue
+            val b = synchronized(gfxLock) { gfxObjs.find { it.name == j.b } } ?: continue
+            if (j.type == 0) {
+                val dx = b.x - a.x
+                val dy = b.y - a.y
+                val d = Math.hypot(dx, dy)
+                if (d > j.len) {
+                    val ux = dx / d
+                    val uy = dy / d
+                    val diff = d - j.len
+                    if (a.bodyType == 0) { a.x += ux * diff * 0.5; a.y += uy * diff * 0.5 }
+                    if (b.bodyType == 0) { b.x -= ux * diff * 0.5; b.y -= uy * diff * 0.5 }
+                    if (Math.abs(diff) > j.breakF) joints.remove(j.id)
+                }
+            } else if (j.type == 1) {
+                val dx = b.x - a.x
+                val dy = b.y - a.y
+                val d = Math.hypot(dx, dy)
+                val target = j.len
+                if (j.len == 0.0) continue
+                val diff = d - target
+                val force = -j.k * diff - j.d * ((a.vx - b.vx) * (dx / d) + (a.vy - b.vy) * (dy / d))
+                if (a.bodyType == 0) { a.vx += force * 0.016 / a.mass; a.vy += force * 0.016 / a.mass }
+                if (b.bodyType == 0) { b.vx -= force * 0.016 / b.mass; b.vy -= force * 0.016 / b.mass }
+                if (Math.abs(force) > j.breakF) joints.remove(j.id)
+            } else if (j.type == 2) {
+                val mx = (a.x + b.x) / 2
+                val my = (a.y + b.y) / 2
+                if (j.motForce != 0.0) {
+                    if (a.bodyType == 0) a.av += j.motSpeed * 0.016
+                    if (b.bodyType == 0) b.av -= j.motSpeed * 0.016
+                }
+                if (Math.hypot(a.vx, a.vy) > j.breakF) joints.remove(j.id)
+            }
+        }
+        if (toUpdate.isNotEmpty() || joints.isNotEmpty()) renderCurrent()
     }
 
     private fun pollAndRun(cond: String, body: List<BlockItem>, condLine: Int) {
@@ -1290,7 +1538,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
 
     private fun parseRepeatBlock(lines: List<String>, start: Int, base: Int): Int {
         var j = 0
-        val t0 = lines[start].trim()
+        val t0 = stripComment(lines[start]).trim()
         while (j < t0.length && (t0[j].isLetterOrDigit() || t0[j] == '_')) j++
         val (countText, trail, _) = splitRepeatUnit(t0, j)
         if (findKw(trail).any { it.kw == Kw.КОНЕЦ })
@@ -1301,8 +1549,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         var closed = false
         while (i < lines.size) {
             val raw = lines[i]
-            val t = raw.trim()
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            val t = stripComment(raw).trim()
+            if (t.isEmpty()) { i++; continue }
             if (startsKw(t, "конец")) {
                 if (t.substring(5).trim().isNotEmpty())
                     throw NcodeError("после `конец` ничего не должно быть")
@@ -1315,8 +1563,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 while (matchEnd(acc) < 0) {
                     k++
                     if (k >= lines.size) throw NcodeError("нет `конец` для вложенного блока")
-                    val tk = lines[k].trim()
-                    if (tk.isEmpty() || tk.startsWith("#") || tk.startsWith("//")) continue
+                    val tk = stripComment(lines[k]).trim()
+                    if (tk.isEmpty()) continue
                     sub.add(lines[k])
                     acc += " $tk"
                 }
@@ -1381,7 +1629,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     private fun runPoka(lines: List<String>, start: Int, base: Int): Int {
-        val first = lines[start].trim()
+        val first = stripComment(lines[start]).trim()
         if (matchEnd(first) >= 0) throw NcodeError("пока — только блоком: команда с новой строки, конец с новой строки")
         var j = 0
         while (j < first.length && (first[j].isLetterOrDigit() || first[j] == '_')) j++
@@ -1392,8 +1640,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         var closed = false
         while (i < lines.size) {
             val raw = lines[i]
-            val t = raw.trim()
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            val t = stripComment(raw).trim()
+            if (t.isEmpty()) { i++; continue }
             if (startsKw(t, "конец")) {
                 if (t.substring(5).trim().isNotEmpty())
                     throw NcodeError("после `конец` ничего не должно быть")
@@ -1406,8 +1654,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 while (matchEnd(acc) < 0) {
                     k++
                     if (k >= lines.size) throw NcodeError("нет `конец` для вложенного блока")
-                    val tk = lines[k].trim()
-                    if (tk.isEmpty() || tk.startsWith("#") || tk.startsWith("//")) continue
+                    val tk = stripComment(lines[k]).trim()
+                    if (tk.isEmpty()) continue
                     sub.add(lines[k])
                     acc += " $tk"
                 }
@@ -1456,7 +1704,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     private fun runVsegda(lines: List<String>, start: Int, base: Int): Int {
-        val first = lines[start].trim()
+        val first = stripComment(lines[start]).trim()
         val end = matchEnd(first)
         if (end >= 0) {
             if (first.substring(end).trim().isNotEmpty())
@@ -1497,8 +1745,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         var closed = false
         while (i < lines.size) {
             val raw = lines[i]
-            val t = raw.trim()
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("//")) { i++; continue }
+            val t = stripComment(raw).trim()
+            if (t.isEmpty()) { i++; continue }
             if (startsKw(t, "конец")) {
                 if (t.substring(5).trim().isNotEmpty())
                     throw NcodeError("после `конец` ничего не должно быть")
@@ -1511,8 +1759,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 while (matchEnd(acc) < 0) {
                     k++
                     if (k >= lines.size) throw NcodeError("нет `конец` для вложенного блока")
-                    val tk = lines[k].trim()
-                    if (tk.isEmpty() || tk.startsWith("#") || tk.startsWith("//")) continue
+                    val tk = stripComment(lines[k]).trim()
+                    if (tk.isEmpty()) continue
                     sub.add(lines[k])
                     acc += " $tk"
                 }
@@ -1691,7 +1939,6 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         val name = keywordTail(line, "создать список")
         if (name.isEmpty()) throw NcodeError("нужно: создать список <имя>")
         if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
-        if (name.lowercase(java.util.Locale.ROOT) in reserved) throw NcodeError("`$name` — служебное слово, возьми другое имя")
         if (lists.containsKey(name.lowercase(java.util.Locale.ROOT))) throw NcodeError("список `$name` уже есть")
         lists[name.lowercase(java.util.Locale.ROOT)] = mutableListOf()
     }
@@ -1765,6 +2012,321 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         else platform.files.writeText(path, value)
     }
 
+    private var lastHttpCode = 200
+
+    private data class HttpRes(val code: Int, val body: String)
+
+    private fun httpCall(method: String, url: String, body: String?): HttpRes {
+        var res: HttpRes? = null
+        var err: Exception? = null
+        val t = Thread {
+            try {
+                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                try {
+                    conn.requestMethod = method
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 15000
+                    conn.instanceFollowRedirects = true
+                    conn.setRequestProperty("User-Agent", "Ncode")
+                    conn.setRequestProperty("Accept", "*/*")
+                    if (body != null) {
+                        val bytes = body.toByteArray(Charsets.UTF_8)
+                        val ct = if (body.trimStart().startsWith("{")) "application/json" else "text/plain"
+                        conn.doOutput = true
+                        conn.setRequestProperty("Content-Type", ct + "; charset=utf-8")
+                        conn.outputStream.use { it.write(bytes) }
+                    }
+                    val code = conn.responseCode
+                    val stream = if (code >= 400) conn.errorStream else conn.inputStream
+                    val text = try {
+                        stream?.bufferedReader(Charsets.UTF_8)?.readText() ?: ""
+                    } catch (e: Exception) {
+                        ""
+                    }
+                    res = HttpRes(code, text.trimEnd('\r', '\n'))
+                } finally {
+                    try {
+                        conn.disconnect()
+                    } catch (e: Exception) {
+                    }
+                }
+            } catch (e: Exception) {
+                err = e
+            }
+        }
+        t.isDaemon = true
+        t.start()
+        t.join(30000)
+        if (t.isAlive) throw NcodeError("сервер долго не отвечает (таймаут 30 секунд)")
+        err?.let { throw NcodeError("нет ответа от `$url` — проверь адрес и интернет") }
+        return res ?: throw NcodeError("нет ответа от `$url` — проверь адрес и интернет")
+    }
+
+    private fun hasSaveMarker(s: String): Boolean {
+        val ws = wordsOutsideQuotes(s)
+        for (i in ws.indices) {
+            for (m in saveMarkers) {
+                if (i + m.size > ws.size) continue
+                var ok = true
+                for (k in m.indices) {
+                    if (!ws[i + k].text.equals(m[k], ignoreCase = true)) {
+                        ok = false
+                        break
+                    }
+                }
+                if (ok) return true
+            }
+        }
+        return false
+    }
+
+    private fun runZapros(line: String) {
+        val usage = "нужно: запрос <гет|пост|пут|делит|патч> <адрес> [данные <тело>] сохранить в <имя>"
+        var rest = keywordTail(line, "запрос").trim()
+        if (rest.isEmpty()) throw NcodeError(usage)
+        val sp = rest.indexOfFirst { it.isWhitespace() }
+        val methodRaw = if (sp < 0) rest else rest.substring(0, sp)
+        val method = when (methodRaw.lowercase(java.util.Locale.ROOT)) {
+            "гет", "get" -> "GET"
+            "пост", "post" -> "POST"
+            "пут", "put" -> "PUT"
+            "делит", "delete" -> "DELETE"
+            "патч", "patch" -> "PATCH"
+            else -> throw NcodeError("не знаю метод `$methodRaw` (можно: гет, пост, пут, делит, патч)")
+        }
+        if (sp < 0) throw NcodeError(usage)
+        rest = rest.substring(sp).trim()
+        if (rest.isEmpty()) throw NcodeError(usage)
+        val sp2 = rest.indexOfFirst { it.isWhitespace() }
+        val urlRaw = if (sp2 < 0) rest else rest.substring(0, sp2)
+        val middle = if (sp2 < 0) "" else rest.substring(sp2).trim()
+        val url = if (urlRaw.length >= 2 && urlRaw.startsWith("\"") && urlRaw.endsWith("\"")) {
+            val inner = urlRaw.substring(1, urlRaw.length - 1).trim()
+            if (!nameRegex.matches(inner)) throw NcodeError("плохое имя в кавычках `\"$inner\"`")
+            vars[inner.lowercase(java.util.Locale.ROOT)] ?: throw NcodeError("нет переменной \"$inner\"")
+        } else urlRaw
+        val lowUrl = url.lowercase(java.util.Locale.ROOT)
+        if (!lowUrl.startsWith("http://") && !lowUrl.startsWith("https://")) throw NcodeError("адрес должен начинаться с http:// или https://")
+        if (middle.isEmpty() || !hasSaveMarker(middle)) throw NcodeError(usage + ", пример: запрос гет " + url + " сохранить в ответ")
+        val (before, name) = try {
+            splitAsk(middle)
+        } catch (e: NcodeError) {
+            throw NcodeError(usage)
+        }
+        if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
+        val body: String? = if (before.isEmpty()) {
+            null
+        } else {
+            val bt = before.trim()
+            val bsp = bt.indexOfFirst { it.isWhitespace() }
+            if (bsp < 0 || !bt.substring(0, bsp).equals("данные", ignoreCase = true)) throw NcodeError("нужно: ... данные <тело> сохранить в <имя>")
+            val btBody = bt.substring(bsp).trim()
+            if (btBody.isEmpty()) throw NcodeError("после `данные` нужно тело запроса")
+            evalExpression(btBody)
+        }
+        if (dryRun) {
+            vars[name.lowercase(java.util.Locale.ROOT)] = "1"
+            lastHttpCode = 200
+            return
+        }
+        val r = httpCall(method, url, body)
+        vars[name.lowercase(java.util.Locale.ROOT)] = r.body
+        lastHttpCode = r.code
+    }
+
+    private fun encodeJsonValue(v: String): String {
+        val t = v.trim()
+        if (numberRegex.matches(t)) return t
+        val low = t.lowercase(java.util.Locale.ROOT)
+        if (low == "истина" || low == "да" || low == "правда") return "true"
+        if (low == "ложь" || low == "нет" || low == "неправда") return "false"
+        if (low == "null") return "null"
+        val sb = StringBuilder("\"")
+        for (c in t) {
+            when (c) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> if (c < ' ') sb.append("\\u" + c.code.toString(16).padStart(4, '0')) else sb.append(c)
+            }
+        }
+        return sb.append("\"").toString()
+    }
+
+    private fun decodeJsonValue(body: String): String {
+        val t = body.trim()
+        if (t.isEmpty() || t == "null") return ""
+        if (t == "true") return "истина"
+        if (t == "false") return "ложь"
+        if (t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")) {
+            val inner = t.substring(1, t.length - 1)
+            val sb = StringBuilder()
+            var i = 0
+            while (i < inner.length) {
+                val c = inner[i]
+                if (c == '\\' && i + 1 < inner.length) {
+                    when (inner[i + 1]) {
+                        '"', '\\', '/' -> {
+                            sb.append(inner[i + 1])
+                            i += 2
+                        }
+                        'n' -> {
+                            sb.append('\n')
+                            i += 2
+                        }
+                        'r' -> {
+                            sb.append('\r')
+                            i += 2
+                        }
+                        't' -> {
+                            sb.append('\t')
+                            i += 2
+                        }
+                        'b' -> {
+                            sb.append('\b')
+                            i += 2
+                        }
+                        'f' -> {
+                            sb.append('\u000C')
+                            i += 2
+                        }
+                        'u' -> if (i + 5 < inner.length) {
+                            sb.append(inner.substring(i + 2, i + 6).toIntOrNull(16)?.toChar() ?: '?')
+                            i += 6
+                        } else {
+                            sb.append(c)
+                            i++
+                        }
+                        else -> {
+                            sb.append(c)
+                            i++
+                        }
+                    }
+                } else {
+                    sb.append(c)
+                    i++
+                }
+            }
+            return sb.toString()
+        }
+        return t
+    }
+
+    private fun bazaToken(raw: String): String {
+        val t = raw.trim()
+        if (t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")) {
+            val inner = t.substring(1, t.length - 1).trim()
+            if (!nameRegex.matches(inner)) throw NcodeError("плохое имя в кавычках `\"$inner\"`")
+            return vars[inner.lowercase(java.util.Locale.ROOT)] ?: throw NcodeError("нет переменной \"$inner\"")
+        }
+        return t
+    }
+
+    private fun normBaseUrl(raw: String): String {
+        return checkBaseUrl(bazaToken(raw))
+    }
+
+    private fun checkBaseUrl(u: String): String {
+        if (u.isEmpty()) throw NcodeError("пустой адрес базы")
+        val withScheme = if (u.contains("://")) u else "https://$u"
+        val low = withScheme.lowercase(java.util.Locale.ROOT)
+        if (!low.startsWith("http://") && !low.startsWith("https://")) throw NcodeError("адрес базы должен быть http(s)-ссылкой")
+        return withScheme.trimEnd('/')
+    }
+
+    private fun normBasePath(raw: String): String {
+        return checkBasePath(bazaToken(raw))
+    }
+
+    private fun checkBasePath(p: String): String {
+        return p.trim().trim('/')
+    }
+
+    private fun bazaAddrPath(first: String, second: String): Pair<String, String> {
+        val v1 = bazaToken(first)
+        val v2 = bazaToken(second)
+        val u1 = v1.contains("://") || v1.contains(".")
+        val u2 = v2.contains("://") || v2.contains(".")
+        return if (!u1 && u2) {
+            Pair(checkBaseUrl(v2), checkBasePath(v1))
+        } else {
+            Pair(checkBaseUrl(v1), checkBasePath(v2))
+        }
+    }
+
+    private fun encodeBasePath(path: String): String {
+        if (path.isEmpty()) return ""
+        return path.split("/").joinToString("/") { seg ->
+            java.net.URLEncoder.encode(seg, "UTF-8").replace("+", "%20")
+        }
+    }
+
+    private fun runZapisatBazu(line: String) {
+        return runWriteBaza(line, "записать в базу", false)
+    }
+
+    private fun runWriteBaza(line: String, kw: String, onlyNew: Boolean) {
+        val usage = if (onlyNew) "нужно: создать в базе <адрес> <путь> <значение> (можно: <путь> <адрес>)" else "нужно: записать в базу <адрес> <путь> <значение> (можно: <путь> <адрес>)"
+        val rest = keywordTail(line, kw).trim()
+        if (rest.isEmpty()) throw NcodeError(usage)
+        val parts = rest.split(Regex("\\s+"), limit = 3)
+        if (parts.size < 3 || parts[2].trim().isEmpty()) throw NcodeError(usage + ", пример: " + kw + " https://моя-игра.firebaseio.com очки/рекорд 100")
+        val (base, path) = bazaAddrPath(parts[0], parts[1])
+        if (onlyNew && path.isEmpty()) throw NcodeError("нужен путь (ключ), пример: очки/рекорд")
+        val value = evalExpression(parts[2].trim())
+        if (dryRun) return
+        if (onlyNew) {
+            val cur = httpCall("GET", base + "/" + encodeBasePath(path) + ".json", null)
+            if (cur.code >= 400) throw NcodeError("база отказала (код " + cur.code + ") — проверь правила доступа и путь")
+            if (decodeJsonValue(cur.body).isNotEmpty()) throw NcodeError("уже есть `" + path + "` — `записать в базу` перезапишет")
+        }
+        val r = httpCall("PUT", base + "/" + encodeBasePath(path) + ".json", encodeJsonValue(value))
+        if (r.code >= 400) throw NcodeError("база отказала (код " + r.code + ") — проверь правила доступа и путь")
+    }
+
+    private fun runSozdatBazu(line: String) {
+        return runWriteBaza(line, "создать в базе", true)
+    }
+
+    private fun runProchitatBazu(line: String) {
+        val usage = "нужно: прочитать базу <адрес> <путь> сохранить в <имя> (можно: прочитать базу <путь> <адрес> сохранить в <имя>)"
+        val rest = keywordTail(line, "прочитать базу").trim()
+        if (rest.isEmpty()) throw NcodeError(usage)
+        val parts = rest.split(Regex("\\s+"), limit = 3)
+        if (parts.size < 3) throw NcodeError(usage + ", пример: прочитать базу https://моя-игра.firebaseio.com очки/рекорд сохранить в рекорд")
+        val (base, path) = bazaAddrPath(parts[0], parts[1])
+        val tail = parts[2].trim()
+        if (!hasSaveMarker(tail)) throw NcodeError(usage)
+        val (before, name) = try {
+            splitAsk(tail)
+        } catch (e: NcodeError) {
+            throw NcodeError(usage)
+        }
+        if (before.isNotEmpty()) throw NcodeError(usage)
+        if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
+        if (dryRun) {
+            vars[name.lowercase(java.util.Locale.ROOT)] = "1"
+            return
+        }
+        val r = httpCall("GET", base + "/" + encodeBasePath(path) + ".json", null)
+        if (r.code >= 400) throw NcodeError("база отказала (код " + r.code + ") — проверь правила доступа и путь")
+        vars[name.lowercase(java.util.Locale.ROOT)] = decodeJsonValue(r.body)
+    }
+
+    private fun runUdalitBazu(line: String) {
+        val usage = "нужно: удалить из базы <адрес> <путь> (можно: удалить из базы <путь> <адрес>)"
+        val rest = keywordTail(line, "удалить из базы").trim()
+        if (rest.isEmpty()) throw NcodeError(usage)
+        val parts = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (parts.size != 2) throw NcodeError(usage + ", пример: удалить из базы https://моя-игра.firebaseio.com очки/рекорд")
+        val (base, path) = bazaAddrPath(parts[0], parts[1])
+        if (dryRun) return
+        val r = httpCall("DELETE", base + "/" + encodeBasePath(path) + ".json", null)
+        if (r.code >= 400) throw NcodeError("база отказала (код " + r.code + ") — проверь правила доступа и путь")
+    }
+
     private val dryWritten = mutableSetOf<String>()
 
     private fun readFileText(path: String): String {
@@ -1794,6 +2356,26 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         var text: String? = null,
         var vel: Double = 0.0,
         var lastMove: Long = 0,
+        var bodyType: Int = 0,
+        var mass: Double = 1.0,
+        var rest: Double = 0.2,
+        var fric: Double = 0.5,
+        var linDamp: Double = 0.0,
+        var angDamp: Double = 0.0,
+        var fixedRot: Boolean = false,
+        var gravScale: Double = 1.0,
+        var bullet: Boolean = false,
+        var vx: Double = 0.0,
+        var vy: Double = 0.0,
+        var av: Double = 0.0,
+        var colType: Int = 0,
+        var colW: Double = 0.0,
+        var colH: Double = 0.0,
+        var colR: Double = 0.0,
+        var colDx: Double = 0.0,
+        var colDy: Double = 0.0,
+        var isTrigger: Boolean = false,
+        var lastHit: Double = 0.0,
         var penDown: Boolean = false,
         var penR: Int = 0,
         var penG: Int = 0,
@@ -1805,9 +2387,20 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     private var gfxW = 800
     private var gfxH = 600
     private var windowScalable = false
+    private var camFollow: String? = null
+    private var camX = 0.0
+    private var camY = 0.0
     private var bgR = 0
     private var bgG = 0
     private var bgB = 0
+    private var gravX = 0.0
+    private var gravY = -9.8
+    private var airDens = 0.0
+    private var lastCollX = 0.0
+    private var lastCollY = 0.0
+    private data class Joint(val id: String, var a: String, var b: String, var type: Int, var len: Double = 0.0, var k: Double = 0.0, var d: Double = 0.0, var x: Double = 0.0, var y: Double = 0.0, var minA: Double = 0.0, var maxA: Double = 0.0, var motSpeed: Double = 0.0, var motForce: Double = 0.0, var breakF: Double = Double.MAX_VALUE)
+    private val joints = mutableMapOf<String, Joint>()
+    private var jointSeq = 0
     private val gfxObjs = mutableListOf<GObj>()
     private val penLines = mutableListOf<PenSeg>()
     private val gfxLock = Object()
@@ -1835,8 +2428,20 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
 
     private val varShows = mutableMapOf<String, VarSlot>()
 
+    private fun applyCamera() {
+        val target = camFollow ?: return
+        val o = synchronized(gfxLock) { gfxObjs.find { it.name == target }?.copy() } ?: return
+        camX = o.x
+        camY = o.y
+        try {
+            platform.gfx.setCamera(camX, camY)
+        } catch (e: Exception) {
+        }
+    }
+
     private fun renderCurrent() {
         if (dryRun || !platform.gfx.isOpen()) return
+        applyCamera()
         val snap: List<GObj>
         val trails: List<PenSeg>
         val labels: List<VarLabel>
@@ -1912,6 +2517,165 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         renderCurrent()
     }
 
+    private fun resetScene() {
+        handlers.clear()
+        keyHandlers.clear()
+        keyUpHandlers.clear()
+        mouseHandlers.clear()
+        cloneHandlers.clear()
+        procHandlers.clear()
+        timerHandlers.clear()
+        collHandlers.clear()
+        trigHandlers.clear()
+        collLast.clear()
+        trigLast.clear()
+        cloneCount.clear()
+        kakListeners.clear()
+        synchronized(keyQueue) { keyQueue.clear() }
+        synchronized(keyUpQueue) { keyUpQueue.clear() }
+        synchronized(mouseQueue) { mouseQueue.clear() }
+        synchronized(keyQueue) { heldKeys.clear() }
+        mouseDown = false
+        synchronized(gfxLock) {
+            gfxObjs.clear()
+            penLines.clear()
+            varShows.clear()
+        }
+        joints.clear()
+        jointSeq = 0
+        lastDrawn = null
+        gfxEverOpened = false
+        gfxW = 800
+        gfxH = 600
+        bgR = 0
+        bgG = 0
+        bgB = 0
+        gravX = 0.0
+        gravY = -9.8
+        airDens = 0.0
+        lastCollX = 0.0
+        lastCollY = 0.0
+        lastData = ""
+        lastHttpCode = 200
+        windowScalable = false
+        camFollow = null
+        camX = 0.0
+        camY = 0.0
+        try {
+            platform.gfx.setCamera(0.0, 0.0)
+        } catch (_: Exception) {}
+        broadcastDepth = 0
+        procDepth = 0
+        execFailed = false
+        warnedCycle = false
+        warnedNoWindow = false
+        lastPhys = 0L
+        lastLabelRender = 0L
+        sndStopAll()
+        synchronized(sndLock) { sndVol.clear() }
+    }
+
+    private fun readChildScript(rawPath: String): Pair<String, List<String>> {
+        val cands = mutableListOf(rawPath)
+        scriptStack.lastOrNull()?.let { top ->
+            val s = top.replace('\\', '/')
+            if (s.contains("/")) {
+                val withBase = s.substringBeforeLast("/") + "/" + rawPath
+                if (withBase != rawPath) cands.add(withBase)
+            }
+        }
+        for (c in cands) {
+            var canon: String? = null
+            try {
+                val f = resolveScriptFile(c, currentScriptDir())
+                canon = try {
+                    f.canonicalPath
+                } catch (e: Exception) {
+                    f.path
+                }
+            } catch (e: NcodeError) {
+            }
+            if (canon == null) {
+                try {
+                    if (platform.files.exists(c)) canon = c
+                } catch (e: Exception) {
+                }
+            }
+            if (canon == null) continue
+            if (canon in scriptStack || c in scriptStack) throw NcodeError("круг: `$rawPath` уже запущен выше")
+            return canon to platform.files.readText(canon).split("\n")
+        }
+        throw NcodeError("нет файла `$rawPath`")
+    }
+
+    private fun runZapustit(line: String) {
+        val usage = "нужно: запустить <файл.ncode> [истина|ложь], пример: запустить уровень2.ncode"
+        val rest = keywordTail(line, "запустить").trim()
+        if (rest.isEmpty()) throw NcodeError(usage)
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size > 2) throw NcodeError(usage)
+        val rawPath = toks[0]
+        var wipe = false
+        if (toks.size == 2) {
+            val v = evalExpression(toks[1])
+            wipe = when (v.lowercase(java.util.Locale.ROOT)) {
+                "истина", "да", "правда", "1" -> true
+                "ложь", "нет", "неправда", "0" -> false
+                else -> throw NcodeError("тут нужно истина/ложь или 1/0, а тут `$v`")
+            }
+        }
+        val (canon, childLines) = readChildScript(rawPath)
+        if (dryRun) {
+            if (wipe) {
+                val probe = NcodeInterpreter(platform)
+                probe.dryRun = true
+                probe.checkLabel = canon
+                probe.resetScripts(canon)
+                for ((k, v) in vars) probe.vars[k] = v
+                for ((k, v) in lists) probe.lists[k] = v.toMutableList()
+                val skips = try {
+                    probe.loadHandlers(childLines)
+                } catch (e: NcodeError) {
+                    reportError(1, e.message)
+                    execFailed = true
+                    return
+                }
+                if (probe.runLines(childLines, 1, skips) != 0) execFailed = true
+                if (probe.checkHandlers() != 0) execFailed = true
+                if (probe.checkKeyHandlers() != 0) execFailed = true
+            } else {
+                scriptStack.add(canon)
+                try {
+                    val skips = extractHandlers(childLines)
+                    if (runLines(childLines, 1, skips) != 0) execFailed = true
+                } finally {
+                    scriptStack.removeAt(scriptStack.size - 1)
+                }
+            }
+            return
+        }
+        if (!wipe) {
+            scriptStack.add(canon)
+            try {
+                val skips = extractHandlers(childLines)
+                runLines(childLines, 1, skips)
+            } finally {
+                if (scriptStack.isNotEmpty()) scriptStack.removeAt(scriptStack.size - 1)
+            }
+            return
+        }
+        resetScene()
+        if (platform.gfx.isOpen()) {
+            try {
+                platform.gfx.closeWindow()
+            } catch (_: Exception) {}
+        }
+        resetScripts(canon)
+        val skips = loadHandlers(childLines)
+        runLines(childLines, 1, skips)
+        throw SceneStop()
+    }
+
     private fun runMasshtabOkna(line: String) {
         val rest = keywordTail(line, "масштабирование окна").trim()
         if (rest.isEmpty()) throw NcodeError("нужно: масштабирование окна истина/ложь (можно 1/0)")
@@ -1928,6 +2692,62 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 platform.gfx.setResizable(flag)
             } catch (_: Exception) {}
         }
+    }
+
+    private fun runSledit(line: String) {
+        val usage = "нужно: следить за объектом <имя> истина/ложь (можно 1/0)"
+        val rest = keywordTail(line, "следить").trim()
+        if (rest.isEmpty()) throw NcodeError(usage)
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        val name: String
+        val flagRaw: String
+        if (toks.size == 4 && toks[0].lowercase(java.util.Locale.ROOT) == "за" &&
+            (toks[1].lowercase(java.util.Locale.ROOT) == "объектом" || toks[1].lowercase(java.util.Locale.ROOT) == "обьектом")
+        ) {
+            name = toks[2]
+            flagRaw = toks[3]
+        } else if (toks.size == 2) {
+            name = toks[0]
+            flagRaw = toks[1]
+        } else throw NcodeError(usage + ", пример: следить за объектом игрок истина")
+        if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
+        val v = evalExpression(flagRaw)
+        val flag = when (v.lowercase(java.util.Locale.ROOT)) {
+            "истина", "да", "правда", "1" -> true
+            "ложь", "нет", "неправда", "0" -> false
+            else -> throw NcodeError("тут нужно истина/ложь или 1/0, а тут `$v`")
+        }
+        if (flag) {
+            camFollow = name.lowercase(java.util.Locale.ROOT)
+        } else {
+            camFollow = null
+            camX = 0.0
+            camY = 0.0
+            if (!dryRun && platform.gfx.isOpen()) {
+                try {
+                    platform.gfx.setCamera(0.0, 0.0)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun isPhysZadat(low: String): Boolean {
+        return low.startsWith("задать гравитацию") || low.startsWith("задать плотность воздуха") || low.startsWith("задать массу") || low.startsWith("задать упругость") || low.startsWith("задать трение") || low.startsWith("задать сопротивление воздуха") || low.startsWith("задать сопротивление вращению") || low.startsWith("задать масштаб гравитации") || low.startsWith("задать пулевой режим") || low.startsWith("задать скорость") || low.startsWith("задать угловую скорость") || low.startsWith("задать коллайдер") || low.startsWith("задать смещение коллайдера") || low.startsWith("задать прочность соединения")
+    }
+
+    private fun stripComment(s: String): String {
+        var inQ = false
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '"') inQ = !inQ
+            if (!inQ) {
+                if (c == '#') return s.substring(0, i)
+                if (c == '/' && i + 1 < s.length && s[i + 1] == '/' && (i == 0 || s[i - 1] != ':')) return s.substring(0, i)
+            }
+            i++
+        }
+        return s
     }
 
     private fun runZakrytOkno(line: String) {
@@ -1984,6 +2804,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             }
             lastDrawn = key
         }
+        resolveStatic(key)
         renderCurrent()
     }
 
@@ -1993,7 +2814,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         val a = toks[0].lowercase(java.util.Locale.ROOT)
         if (a != "задать" && a != "присвоить" && a != "сделать" && a != "изменить" && a != "поменять") return false
         val p = toks[1].lowercase(java.util.Locale.ROOT)
-        if (p != "прозрачность" && p != "размер" && p != "поворот" && p != "угол" && p != "цвет" && p != "образ" && p != "костюм" && p != "форма" && p != "слой" && p != "скорость") return false
+        if (p != "прозрачность" && p != "размер" && p != "поворот" && p != "угол" && p != "цвет" && p != "образ" && p != "костюм" && p != "текстура" && p != "текстуру" && p != "форма" && p != "слой" && p != "тип") return false
         for (x in toks) if (x.lowercase(java.util.Locale.ROOT) == "объекту") return true
         return false
     }
@@ -2015,11 +2836,17 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         while (k < afterAct.length && (afterAct[k].isLetterOrDigit() || afterAct[k] == '_')) k++
         val prop = afterAct.substring(0, k).lowercase(java.util.Locale.ROOT)
         val tail = afterAct.substring(k).trim()
-        if (prop == "образ" || prop == "костюм") {
+        if (prop == "образ" || prop == "костюм" || prop == "текстура" || prop == "текстуру") {
             val toks = tail.split(Regex("\\s+")).filter { it.isNotEmpty() }
-            if (toks.size != 3 || toks[0].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать образ объекту <имя> <путь>")
-            val name = toks[1].lowercase(java.util.Locale.ROOT)
-            val path = toks[2]
+            val name: String
+            val path: String
+            if (toks.size == 3 && toks[0].lowercase(java.util.Locale.ROOT) == "объекту") {
+                name = toks[1].lowercase(java.util.Locale.ROOT)
+                path = toks[2]
+            } else if (toks.size == 3 && toks[1].lowercase(java.util.Locale.ROOT) == "объекту") {
+                path = toks[0]
+                name = toks[2].lowercase(java.util.Locale.ROOT)
+            } else throw NcodeError("нужно: задать образ объекту <имя> <путь> или задать текстуру <путь> объекту <имя>")
             if (dryRun) {
                 resolveScriptFile(path, currentScriptDir())
                 return
@@ -2142,6 +2969,28 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             }
             return
         }
+        if (prop == "тип") {
+            val raw = before.joinToString(" ").trim().lowercase(java.util.Locale.ROOT).replace("ё", "е")
+            val toks2 = raw.split(Regex("\\s+")).filter { it.isNotEmpty() }
+            val valWord = when {
+                toks2.size == 2 && toks2[0] == "движения" -> toks2[1]
+                toks2.size == 1 -> toks2[0]
+                else -> throw NcodeError("нужно: задать тип движения динамичный|статичный объекту <имя>")
+            }
+            val isStat = when {
+                valWord.startsWith("стат") -> true
+                valWord.startsWith("дин") -> false
+                else -> throw NcodeError("нужно: задать тип движения динамичный|статичный объекту <имя>")
+            }
+            if (dryRun) return
+            requireWindow()
+            synchronized(gfxLock) {
+                val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+                o.bodyType = if (isStat) 1 else 0
+            }
+            renderCurrent()
+            return
+        }
         throw NcodeError("неизвестная команда")
     }
 
@@ -2227,7 +3076,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 nm = parent + n
             }
             cloneCount[parent] = n
-            gfxObjs.add(GObj(nm, src.x, src.y, src.size, src.rot, src.r, src.g, src.b, src.alpha, src.costumes.toMutableList(), src.costume, src.visible, src.circle, src.text, src.vel, 0, false, src.penR, src.penG, src.penB, src.penSize))
+            gfxObjs.add(GObj(nm, src.x, src.y, src.size, src.rot, src.r, src.g, src.b, src.alpha, src.costumes.toMutableList(), src.costume, src.visible, src.circle, src.text, src.vel, 0, src.bodyType, src.mass, src.rest, src.fric, src.linDamp, src.angDamp, src.fixedRot, src.gravScale, src.bullet, src.vx, src.vy, src.av, src.colType, src.colW, src.colH, src.colR, src.colDx, src.colDy, src.isTrigger, src.lastHit, false, src.penR, src.penG, src.penB, src.penSize))
             lastDrawn = nm
         }
         renderCurrent()
@@ -2277,6 +3126,522 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         } finally {
             procDepth--
         }
+    }
+
+    private fun runSetGrav(line: String) {
+        val rest = keywordTail(line, "задать гравитацию").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 2) throw NcodeError("нужно: задать гравитацию X Y")
+        val x = evalArithOperand(toks[0])
+        val y = evalArithOperand(toks[1])
+        if (dryRun) return
+        gravX = x
+        gravY = y
+    }
+
+    private fun runSetAirDens(line: String) {
+        val rest = keywordTail(line, "задать плотность воздуха").trim()
+        if (rest.isEmpty()) throw NcodeError("нужно: задать плотность воздуха ЗНАЧЕНИЕ")
+        val v = evalArithOperand(rest)
+        if (v < 0) throw NcodeError("плотность >=0")
+        if (dryRun) return
+        airDens = v
+    }
+
+    private fun runApplyForce(line: String, impulse: Boolean) {
+        val kw = if (impulse) "приложить импульс" else "приложить силу"
+        val rest = keywordTail(line, kw).trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 4 || toks[2].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: $kw X Y объекту ИМЯ")
+        val fx = evalArithOperand(toks[0])
+        val fy = evalArithOperand(toks[1])
+        val name = toks[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            if (o.bodyType == 1) return
+            if (impulse) {
+                o.vx += fx / o.mass
+                o.vy += fy / o.mass
+            } else {
+                o.vx += fx / o.mass * 0.016
+                o.vy += fy / o.mass * 0.016
+            }
+        }
+    }
+
+    private fun runApplyForceAt(line: String) {
+        val rest = keywordTail(line, "приложить силу в точке").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 8 || toks[2].lowercase(java.util.Locale.ROOT) != "по" || toks[3].lowercase(java.util.Locale.ROOT) != "координатам" || toks[6].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: приложить силу в точке X Y по координатам PX PY объекту ИМЯ")
+        val fx = evalArithOperand(toks[0])
+        val fy = evalArithOperand(toks[1])
+        val px = evalArithOperand(toks[4])
+        val py = evalArithOperand(toks[5])
+        val name = toks[7].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            if (o.bodyType == 1) return
+            o.vx += fx / o.mass * 0.016
+            o.vy += fy / o.mass * 0.016
+            val dx = px - o.x
+            val dy = py - o.y
+            o.av += (dx * fy - dy * fx) / (o.mass * 100.0)
+        }
+    }
+
+    private fun runTorque(line: String) {
+        val rest = keywordTail(line, "приложить крутящий момент").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: приложить крутящий момент ЗНАЧЕНИЕ объекту ИМЯ")
+        val v = evalArithOperand(toks[0])
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            if (o.bodyType == 1) return
+            o.av += v / o.mass
+        }
+    }
+
+    private fun runAttract2(line: String) {
+        val low = line.lowercase(java.util.Locale.ROOT)
+        val m = Regex("притянуть объект\\s+(\\S+)\\s+к объекту\\s+(\\S+)\\s+с силой\\s+(\\S+)").find(low) ?: throw NcodeError("нужно: притянуть объект ИМЯ1 к объекту ИМЯ2 с силой СИЛА")
+        val n1 = m.groupValues[1].lowercase(java.util.Locale.ROOT)
+        val n2 = m.groupValues[2].lowercase(java.util.Locale.ROOT)
+        val f = evalArithOperand(m.groupValues[3])
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val a = gfxObjs.find { it.name == n1 } ?: throw NcodeError("объект не нарисован")
+            val b = gfxObjs.find { it.name == n2 } ?: throw NcodeError("объект не нарисован")
+            if (a.bodyType == 1 || b.bodyType == 1) return
+            val dx = b.x - a.x
+            val dy = b.y - a.y
+            val d = kotlin.math.sqrt(dx * dx + dy * dy)
+            if (d < 0.01) return
+            val ux = dx / d
+            val uy = dy / d
+            a.vx += ux * f / a.mass * 0.016
+            a.vy += uy * f / a.mass * 0.016
+            b.vx -= ux * f / b.mass * 0.016
+            b.vy -= uy * f / b.mass * 0.016
+        }
+    }
+
+    private fun runStopForces(line: String) {
+        val rest = keywordTail(line, "остановить все силы").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 2 || toks[0].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: остановить все силы объекту ИМЯ")
+        val name = toks[1].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.vx = 0.0
+            o.vy = 0.0
+            o.av = 0.0
+        }
+    }
+
+    private fun runMakeBody(line: String, type: Int) {
+        val kw = when (type) {
+            0 -> "сделать тело динамическим"
+            1 -> "сделать тело статическим"
+            else -> "сделать тело кинематическим"
+        }
+        val rest = keywordTail(line, kw).trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 2 || toks[0].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: $kw объекту ИМЯ")
+        val name = toks[1].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.bodyType = type
+        }
+        renderCurrent()
+    }
+
+    private fun runSetMass(line: String) {
+        val rest = keywordTail(line, "задать массу").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать массу МАССА объекту ИМЯ")
+        val m = evalArithOperand(toks[0])
+        if (m <= 0) throw NcodeError("масса >0")
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.mass = m
+        }
+    }
+
+    private fun runSetRest(line: String) {
+        val rest = keywordTail(line, "задать упругость").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать упругость 0..1 объекту ИМЯ")
+        val v = evalArithOperand(toks[0])
+        if (v < 0 || v > 1) throw NcodeError("упругость 0..1")
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.rest = v
+        }
+    }
+
+    private fun runSetFric(line: String) {
+        val rest = keywordTail(line, "задать трение").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать трение ЗНАЧЕНИЕ объекту ИМЯ")
+        val v = evalArithOperand(toks[0])
+        if (v < 0) throw NcodeError("трение >=0")
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.fric = v
+        }
+    }
+
+    private fun runSetLinDamp(line: String) {
+        val rest = keywordTail(line, "задать сопротивление воздуха").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать сопротивление воздуха ЗНАЧЕНИЕ объекту ИМЯ")
+        val v = evalArithOperand(toks[0])
+        if (v < 0) throw NcodeError(">=0")
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.linDamp = v
+        }
+    }
+
+    private fun runSetAngDamp(line: String) {
+        val rest = keywordTail(line, "задать сопротивление вращению").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать сопротивление вращению ЗНАЧЕНИЕ объекту ИМЯ")
+        val v = evalArithOperand(toks[0])
+        if (v < 0) throw NcodeError(">=0")
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.angDamp = v
+        }
+    }
+
+    private fun runFixRot(line: String) {
+        val rest = keywordTail(line, "зафиксировать вращение").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: зафиксировать вращение ИСТИНА/ЛОЖЬ объекту ИМЯ")
+        val b = toBool(evalExpression(toks[0]))
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.fixedRot = b
+        }
+    }
+
+    private fun runGravScale(line: String) {
+        val rest = keywordTail(line, "задать масштаб гравитации").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать масштаб гравитации ЗНАЧЕНИЕ объекту ИМЯ")
+        val v = evalArithOperand(toks[0])
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.gravScale = v
+        }
+    }
+
+    private fun runBullet(line: String) {
+        val rest = keywordTail(line, "задать пулевой режим").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать пулевой режим ИСТИНА/ЛОЖЬ объекту ИМЯ")
+        val b = toBool(evalExpression(toks[0]))
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.bullet = b
+        }
+    }
+
+    private fun runSetVel(line: String) {
+        val rest = keywordTail(line, "задать скорость").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 4 || toks[2].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать скорость X Y объекту ИМЯ")
+        val x = evalArithOperand(toks[0])
+        val y = evalArithOperand(toks[1])
+        val name = toks[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.vx = x
+            o.vy = y
+        }
+    }
+
+    private fun runSetAngVel(line: String) {
+        val rest = keywordTail(line, "задать угловую скорость").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать угловую скорость СКОРОСТЬ объекту ИМЯ")
+        val v = evalArithOperand(toks[0])
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.av = v
+        }
+    }
+
+    private fun runTeleport(line: String) {
+        val rest = keywordTail(line, "телепортировать").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 4 || toks[2].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: телепортировать X Y объекту ИМЯ")
+        val x = evalArithOperand(toks[0])
+        val y = evalArithOperand(toks[1])
+        val name = toks[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.x = x
+            o.y = y
+            o.vx = 0.0
+            o.vy = 0.0
+        }
+        resolveStatic(name)
+        renderCurrent()
+    }
+
+    private fun runColliderBox(line: String) {
+        val rest = keywordTail(line, "задать коллайдер коробка").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 4 || toks[2].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать коллайдер коробка ШИРИНА ВЫСОТА объекту ИМЯ")
+        val w = evalArithOperand(toks[0])
+        val h = evalArithOperand(toks[1])
+        if (w <= 0 || h <= 0) throw NcodeError("размер >0")
+        val name = toks[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.colType = 0
+            o.colW = w
+            o.colH = h
+        }
+    }
+
+    private fun runColliderCircle(line: String) {
+        val rest = keywordTail(line, "задать коллайдер круг").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать коллайдер круг РАДИУС объекту ИМЯ")
+        val r = evalArithOperand(toks[0])
+        if (r <= 0) throw NcodeError("радиус >0")
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.colType = 1
+            o.colR = r
+        }
+    }
+
+    private fun runColliderCapsule(line: String) {
+        val rest = keywordTail(line, "задать коллайдер капсула").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 4 || toks[2].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать коллайдер капсула ШИРИНА ВЫСОТА объекту ИМЯ")
+        val w = evalArithOperand(toks[0])
+        val h = evalArithOperand(toks[1])
+        if (w <= 0 || h <= 0) throw NcodeError("размер >0")
+        val name = toks[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.colType = 2
+            o.colW = w
+            o.colH = h
+        }
+    }
+
+    private fun runColliderOffset(line: String) {
+        val rest = keywordTail(line, "задать смещение коллайдера").trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 4 || toks[2].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: задать смещение коллайдера DX DY объекту ИМЯ")
+        val dx = evalArithOperand(toks[0])
+        val dy = evalArithOperand(toks[1])
+        val name = toks[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.colDx = dx
+            o.colDy = dy
+        }
+    }
+
+    private fun runMakeTrigger(line: String) {
+        val low = line.lowercase(java.util.Locale.ROOT)
+        val kw = if (low.startsWith("сделать триггером")) "сделать триггером" else throw NcodeError("?")
+        val rest = keywordTail(line, kw).trim()
+        val toks = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.size != 3 || toks[1].lowercase(java.util.Locale.ROOT) != "объекту") throw NcodeError("нужно: сделать триггером ИСТИНА/ЛОЖЬ объекту ИМЯ")
+        val b = toBool(evalExpression(toks[0]))
+        val name = toks[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            val o = gfxObjs.find { it.name == name } ?: throw NcodeError("объект не нарисован")
+            o.isTrigger = b
+        }
+    }
+
+    private fun runRope(line: String) {
+        val m = Regex("соединить веревкой\\s+(\\S+)\\s+и\\s+(\\S+)\\s+длина\\s+(\\S+)", RegexOption.IGNORE_CASE).find(line) ?: throw NcodeError("нужно: соединить веревкой ИМЯ1 и ИМЯ2 длина ДЛИНА")
+        val a = m.groupValues[1].lowercase(java.util.Locale.ROOT)
+        val b = m.groupValues[2].lowercase(java.util.Locale.ROOT)
+        val len = evalArithOperand(m.groupValues[3])
+        if (len <= 0) throw NcodeError("длина >0")
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            if (gfxObjs.none { it.name == a } || gfxObjs.none { it.name == b }) throw NcodeError("объект не нарисован")
+        }
+        val id = "j" + (++jointSeq)
+        joints[id] = Joint(id, a, b, 0, len = len)
+        vars["последнее соединение"] = id
+    }
+
+    private fun runSpring(line: String) {
+        val m = Regex("соединить пружиной\\s+(\\S+)\\s+и\\s+(\\S+)\\s+жесткость\\s+(\\S+)\\s+гашение\\s+(\\S+)", RegexOption.IGNORE_CASE).find(line) ?: throw NcodeError("нужно: соединить пружиной ИМЯ1 и ИМЯ2 жесткость К гашение D")
+        val a = m.groupValues[1].lowercase(java.util.Locale.ROOT)
+        val b = m.groupValues[2].lowercase(java.util.Locale.ROOT)
+        val k = evalArithOperand(m.groupValues[3])
+        val d = evalArithOperand(m.groupValues[4])
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            if (gfxObjs.none { it.name == a } || gfxObjs.none { it.name == b }) throw NcodeError("объект не нарисован")
+        }
+        val id = "j" + (++jointSeq)
+        joints[id] = Joint(id, a, b, 1, k = k, d = d)
+        vars["последнее соединение"] = id
+    }
+
+    private fun runHinge(line: String) {
+        val m = Regex("соединить шарниром\\s+(\\S+)\\s+и\\s+(\\S+)\\s+в точке\\s+(\\S+)\\s+(\\S+)", RegexOption.IGNORE_CASE).find(line) ?: throw NcodeError("нужно: соединить шарниром ИМЯ1 и ИМЯ2 в точке X Y")
+        val a = m.groupValues[1].lowercase(java.util.Locale.ROOT)
+        val b = m.groupValues[2].lowercase(java.util.Locale.ROOT)
+        val x = evalArithOperand(m.groupValues[3])
+        val y = evalArithOperand(m.groupValues[4])
+        if (dryRun) return
+        requireWindow()
+        synchronized(gfxLock) {
+            if (gfxObjs.none { it.name == a } || gfxObjs.none { it.name == b }) throw NcodeError("объект не нарисован")
+        }
+        val id = "j" + (++jointSeq)
+        joints[id] = Joint(id, a, b, 2, x = x, y = y)
+        vars["последнее соединение"] = id
+    }
+
+    private fun runLimit(line: String) {
+        val m = Regex("ограничить угол шарнира\\s+(\\S+)\\s+(\\S+)\\s+соединению\\s+(\\S+)", RegexOption.IGNORE_CASE).find(line) ?: throw NcodeError("нужно: ограничить угол шарнира МИН МАКС соединению ID")
+        val mn = evalArithOperand(m.groupValues[1])
+        val mx = evalArithOperand(m.groupValues[2])
+        val id = m.groupValues[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        val j = joints[id] ?: throw NcodeError("нет соединения `$id`")
+        j.minA = mn
+        j.maxA = mx
+    }
+
+    private fun runMotor(line: String) {
+        val m = Regex("задать мотор шарнира\\s+(\\S+)\\s+сила\\s+(\\S+)\\s+соединению\\s+(\\S+)", RegexOption.IGNORE_CASE).find(line) ?: throw NcodeError("нужно: задать мотор шарнира СКОРОСТЬ сила СИЛА соединению ID")
+        val sp = evalArithOperand(m.groupValues[1])
+        val fr = evalArithOperand(m.groupValues[2])
+        val id = m.groupValues[3].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        val j = joints[id] ?: throw NcodeError("нет соединения `$id`")
+        j.motSpeed = sp
+        j.motForce = fr
+    }
+
+    private fun runDelJoint(line: String) {
+        val rest = keywordTail(line, "удалить соединение").trim()
+        if (rest.isEmpty()) throw NcodeError("нужно: удалить соединение ID")
+        val id = rest.lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        if (joints.remove(id) == null) throw NcodeError("нет соединения `$id`")
+    }
+
+    private fun runBreak(line: String) {
+        val m = Regex("задать прочность соединения\\s+(\\S+)\\s+соединению\\s+(\\S+)", RegexOption.IGNORE_CASE).find(line) ?: throw NcodeError("нужно: задать прочность соединения СИЛА_РАЗРЫВА соединению ID")
+        val f = evalArithOperand(m.groupValues[1])
+        val id = m.groupValues[2].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return
+        val j = joints[id] ?: throw NcodeError("нет соединения `$id`")
+        j.breakF = f
+    }
+
+    private fun runRay(line: String): String {
+        val low = line.lowercase(java.util.Locale.ROOT)
+        val m = Regex("бросить луч от\\s+(\\S+)\\s+(\\S+)\\s+до\\s+(\\S+)\\s+(\\S+)\\s+пересекает\\s+(\\S+)").find(low) ?: throw NcodeError("нужно: бросить луч от X1 Y1 до X2 Y2 пересекает ИМЯ")
+        val x1 = evalArithOperand(m.groupValues[1])
+        val y1 = evalArithOperand(m.groupValues[2])
+        val x2 = evalArithOperand(m.groupValues[3])
+        val y2 = evalArithOperand(m.groupValues[4])
+        val name = m.groupValues[5].lowercase(java.util.Locale.ROOT)
+        if (dryRun) return "ложь"
+        val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+        val b = objBox(name) ?: return "ложь"
+        val hit = segmentsIntersect(x1, y1, x2, y2, b[0], b[2], b[1], b[2]) || segmentsIntersect(x1, y1, x2, y2, b[1], b[2], b[1], b[3]) || segmentsIntersect(x1, y1, x2, y2, b[1], b[3], b[0], b[3]) || segmentsIntersect(x1, y1, x2, y2, b[0], b[3], b[0], b[2])
+        return if (hit) "истина" else "ложь"
+    }
+
+    private fun segmentsIntersect(ax: Double, ay: Double, bx: Double, by: Double, cx: Double, cy: Double, dx: Double, dy: Double): Boolean {
+        val d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        val d2 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax)
+        val d3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx)
+        val d4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx)
+        return (d1 * d2 < 0 && d3 * d4 < 0)
+    }
+
+    private fun runRayDist(args: List<String>): String {
+        if (args.size != 5) throw NcodeError("нужно: дистанция луча до ИМЯ от X Y в направлении УГОЛ")
+        val name = args[0].lowercase(java.util.Locale.ROOT)
+        val x = evalArithOperand(args[1])
+        val y = evalArithOperand(args[2])
+        val ang = evalArithOperand(args[3])
+        if (dryRun) return "0"
+        val b = objBox(name) ?: throw NcodeError("объект не нарисован")
+        val rad = Math.toRadians(ang)
+        val farX = x + Math.cos(rad) * 10000
+        val farY = y + Math.sin(rad) * 10000
+        val cx = (b[0] + b[1]) / 2
+        val cy = (b[2] + b[3]) / 2
+        return fmtNum(Math.hypot(cx - x, cy - y))
     }
 
     private fun runPokazat(line: String, keyword: String, show: Boolean) {
@@ -2400,6 +3765,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 o.y = ny
             }
         }
+        resolveStatic(key)
         renderCurrent()
     }
 
@@ -2458,6 +3824,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             o.x = nx
             o.y = ny
         }
+        resolveStatic(key)
         renderCurrent()
     }
 
@@ -2537,6 +3904,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 obj.x = nx
                 obj.y = ny
             }
+            resolveStatic(key)
             renderCurrent()
             try {
                 platform.clock.sleepMs(sleepMs)
@@ -2681,12 +4049,14 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         renderCurrent()
     }
 
-    private data class SndPlay(val line: NcodeSoundLine, val thread: Thread, @Volatile var alive: Boolean, @Volatile var pos: Int = 0, val fmt: SndPcm? = null, val data: ByteArray? = null)
+    private data class SndPlay(val line: NcodeSoundLine, val thread: Thread, @Volatile var alive: Boolean, @Volatile var pos: Int = 0, val fmt: SndPcm? = null, val data: ByteArray? = null, val loop: Boolean = false)
     private val sndLock = Object()
     private val sndActive = mutableMapOf<String, MutableList<SndPlay>>()
     private val sndPaused = mutableMapOf<String, Pair<SndPcm, Int>>()
     private val sndVol = mutableMapOf<String, Int>()
     private val sndExts = setOf("mp3", "wav", "m4a", "ogg")
+    private var musicCanon: String? = null
+    private val maxSfx = 10
 
     private fun sndExt(path: String): String {
         val dot = path.lastIndexOf('.')
@@ -2700,7 +4070,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         return platform.files.realPath(resolveScriptFile(path, currentScriptDir()).path)
     }
 
-    private fun sndStart(canon: String, pcm: SndPcm, wait: Boolean, from: Int = 0) {
+    private fun sndStart(canon: String, pcm: SndPcm, wait: Boolean, from: Int = 0, loop: Boolean = false) {
         val data = pcm.bytes
         val line = platform.sound.openLine(pcm.rate, pcm.channels)
         line.setVolume(synchronized(sndLock) { sndVol[canon] ?: 100 })
@@ -2709,13 +4079,19 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             try {
                 line.start()
                 var off = from
-                while (off < data.size) {
-                    val h = holder[0] ?: break
-                    if (!h.alive) break
-                    line.write(data, off, minOf(8192, data.size - off))
-                    off += 8192
-                    h.pos = off
-                }
+                do {
+                    while (off < data.size) {
+                        val h = holder[0] ?: break
+                        if (!h.alive) break
+                        line.write(data, off, minOf(8192, data.size - off))
+                        off += 8192
+                        h.pos = off
+                    }
+                    if (loop && (holder[0]?.alive == true)) {
+                        off = 0
+                        holder[0]?.pos = 0
+                    } else break
+                } while (true)
                 line.drain()
             } catch (e: Exception) {
             } finally {
@@ -2732,7 +4108,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             }
         }
         th.isDaemon = true
-        val p = SndPlay(line, th, true, from, pcm, data)
+        val p = SndPlay(line, th, true, from, pcm, data, loop)
         holder[0] = p
         synchronized(sndLock) {
             sndActive.getOrPut(canon) { mutableListOf() }.add(p)
@@ -2799,6 +4175,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
 
     private fun sndStop(canon: String) {
         val ps = synchronized(sndLock) {
+            if (musicCanon == canon) musicCanon = null
             (sndActive.remove(canon) ?: mutableListOf()).toList()
         }
         for (p in ps) {
@@ -2806,6 +4183,25 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             try { p.line.stop() } catch (e: Exception) {}
             try { p.line.close() } catch (e: Exception) {}
         }
+    }
+
+    private fun sndStopAll() {
+        val ps = synchronized(sndLock) {
+            musicCanon = null
+            sndPaused.clear()
+            val all = sndActive.values.flatten()
+            sndActive.clear()
+            all
+        }
+        for (p in ps) {
+            p.alive = false
+            try { p.line.stop() } catch (e: Exception) {}
+            try { p.line.close() } catch (e: Exception) {}
+        }
+    }
+
+    private fun sndSfxCount(): Int {
+        return synchronized(sndLock) { sndActive.values.sumOf { l -> l.count { !it.loop } } }
     }
 
     private fun isZvuk(w: String): Boolean {
@@ -2828,18 +4224,36 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             path = toks[3]
         } else throw NcodeError("нужно: играть звук <путь> | играть звук и ждать <путь>")
         val ext = sndExt(path)
+        val isMusic = toks[0].lowercase(java.util.Locale.ROOT) == "музыку"
+        if (isMusic && wait) throw NcodeError("музыка крутится по кругу — `и ждать` нельзя, она бесконечная")
         if (dryRun) {
             resolveScriptFile(path, currentScriptDir())
             return
         }
         val canon = sndCanon(path)
         val dec = platform.sound.decodeFile(path, canon, ext)
+        if (isMusic) {
+            val old = synchronized(sndLock) { musicCanon }
+            if (old != null) sndStop(old)
+            sndStart(canon, dec, false, 0, true)
+            synchronized(sndLock) { musicCanon = canon }
+            return
+        }
+        if (sndSfxCount() >= maxSfx) return
         sndStart(canon, dec, wait)
     }
 
     private fun runOstanovit(line: String, keyword: String) {
         val rest = keywordTail(line, keyword).trim()
-        if (rest.isEmpty() || rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: остановить звук <путь>")
+        val isMusicKw = keyword.lowercase(java.util.Locale.ROOT).contains("музыку")
+        if (rest.isEmpty()) {
+            if (!isMusicKw) throw NcodeError("нужно: остановить звук <путь> (для музыки можно без пути: остановить музыку)")
+            if (dryRun) return
+            val mc = synchronized(sndLock) { musicCanon }
+            if (mc != null) sndStop(mc)
+            return
+        }
+        if (rest.split(Regex("\\s+")).size != 1) throw NcodeError("нужно: остановить звук <путь>")
         sndExt(rest)
         if (dryRun) {
             resolveScriptFile(rest, currentScriptDir())
@@ -2939,7 +4353,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runGromkost(line)
             isBg(line) ->
                 runBg(line)
-            low == "задать" || low.startsWith("задать ") || low.startsWith("задать\t") ->
+            (low == "задать" || low.startsWith("задать ") || low.startsWith("задать\t")) && !isPhysZadat(low) ->
                 runZadat(line)
             isPrintCommand(low) ->
                 runPrint(line)
@@ -2977,6 +4391,10 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runZakrytOkno(line)
             low == "масштабирование окна" || low.startsWith("масштабирование окна ") || low.startsWith("масштабирование окна\t") ->
                 runMasshtabOkna(line)
+            low == "следить" || low.startsWith("следить ") || low.startsWith("следить\t") ->
+                runSledit(line)
+            low == "запустить" || low.startsWith("запустить ") || low.startsWith("запустить\t") ->
+                runZapustit(line)
             low == "нарисовать" || low.startsWith("нарисовать ") || low.startsWith("нарисовать\t") ||
                 low == "рисовать" || low.startsWith("рисовать ") || low.startsWith("рисовать\t") ||
                 low == "рисуй" || low.startsWith("рисуй ") || low.startsWith("рисуй\t") ->
@@ -3009,10 +4427,80 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runKlon(line)
             low == "удалить файл" || low.startsWith("удалить файл ") || low.startsWith("удалить файл\t") ->
                 runUdalitFile(line)
-            low == "удалить" || low.startsWith("удалить ") || low.startsWith("удалить\t") ->
+            low == "удалить из базы" || low.startsWith("удалить из базы ") || low.startsWith("удалить из базы\t") ->
+                runUdalitBazu(line)
+            (low == "удалить" || low.startsWith("удалить ") || low.startsWith("удалить\t")) && !low.startsWith("удалить соединение") ->
                 runUdalit(line)
             low == "вызвать" || low.startsWith("вызвать ") || low.startsWith("вызвать\t") ->
                 runVyzvat(line)
+            low == "задать гравитацию" || low.startsWith("задать гравитацию ") || low.startsWith("задать гравитацию\t") ->
+                runSetGrav(line)
+            low == "задать плотность воздуха" || low.startsWith("задать плотность воздуха ") || low.startsWith("задать плотность воздуха\t") ->
+                runSetAirDens(line)
+            low == "приложить силу в точке" || low.startsWith("приложить силу в точке ") || low.startsWith("приложить силу в точке\t") ->
+                runApplyForceAt(line)
+            low == "приложить силу" || low.startsWith("приложить силу ") || low.startsWith("приложить силу\t") ->
+                runApplyForce(line, false)
+            low == "приложить импульс" || low.startsWith("приложить импульс ") || low.startsWith("приложить импульс\t") ->
+                runApplyForce(line, true)
+            low == "приложить крутящий момент" || low.startsWith("приложить крутящий момент ") || low.startsWith("приложить крутящий момент\t") ->
+                runTorque(line)
+            low == "притянуть объект" || low.startsWith("притянуть объект ") || low.startsWith("притянуть объект\t") ->
+                runAttract2(line)
+            low == "остановить все силы" || low.startsWith("остановить все силы ") || low.startsWith("остановить все силы\t") ->
+                runStopForces(line)
+            low == "сделать тело динамическим" || low.startsWith("сделать тело динамическим ") || low.startsWith("сделать тело динамическим\t") ->
+                runMakeBody(line, 0)
+            low == "сделать тело статическим" || low.startsWith("сделать тело статическим ") || low.startsWith("сделать тело статическим\t") ->
+                runMakeBody(line, 1)
+            low == "сделать тело кинематическим" || low.startsWith("сделать тело кинематическим ") || low.startsWith("сделать тело кинематическим\t") ->
+                runMakeBody(line, 2)
+            low == "задать массу" || low.startsWith("задать массу ") || low.startsWith("задать массу\t") ->
+                runSetMass(line)
+            low == "задать упругость" || low.startsWith("задать упругость ") || low.startsWith("задать упругость\t") ->
+                runSetRest(line)
+            low == "задать трение" || low.startsWith("задать трение ") || low.startsWith("задать трение\t") ->
+                runSetFric(line)
+            low == "задать сопротивление воздуха" || low.startsWith("задать сопротивление воздуха ") || low.startsWith("задать сопротивление воздуха\t") ->
+                runSetLinDamp(line)
+            low == "задать сопротивление вращению" || low.startsWith("задать сопротивление вращению ") || low.startsWith("задать сопротивление вращению\t") ->
+                runSetAngDamp(line)
+            low == "зафиксировать вращение" || low.startsWith("зафиксировать вращение ") || low.startsWith("зафиксировать вращение\t") ->
+                runFixRot(line)
+            low == "задать масштаб гравитации" || low.startsWith("задать масштаб гравитации ") || low.startsWith("задать масштаб гравитации\t") ->
+                runGravScale(line)
+            low == "задать пулевой режим" || low.startsWith("задать пулевой режим ") || low.startsWith("задать пулевой режим\t") ->
+                runBullet(line)
+            low == "задать скорость" || low.startsWith("задать скорость ") || low.startsWith("задать скорость\t") ->
+                runSetVel(line)
+            low == "задать угловую скорость" || low.startsWith("задать угловую скорость ") || low.startsWith("задать угловую скорость\t") ->
+                runSetAngVel(line)
+            low == "телепортировать" || low.startsWith("телепортировать ") || low.startsWith("телепортировать\t") ->
+                runTeleport(line)
+            low == "задать коллайдер коробка" || low.startsWith("задать коллайдер коробка ") || low.startsWith("задать коллайдер коробка\t") ->
+                runColliderBox(line)
+            low == "задать коллайдер круг" || low.startsWith("задать коллайдер круг ") || low.startsWith("задать коллайдер круг\t") ->
+                runColliderCircle(line)
+            low == "задать коллайдер капсула" || low.startsWith("задать коллайдер капсула ") || low.startsWith("задать коллайдер капсула\t") ->
+                runColliderCapsule(line)
+            low == "задать смещение коллайдера" || low.startsWith("задать смещение коллайдера ") || low.startsWith("задать смещение коллайдера\t") ->
+                runColliderOffset(line)
+            low == "сделать триггером" || low.startsWith("сделать триггером ") || low.startsWith("сделать триггером\t") ->
+                runMakeTrigger(line)
+            low == "соединить веревкой" || low.startsWith("соединить веревкой ") || low.startsWith("соединить веревкой\t") ->
+                runRope(line)
+            low == "соединить пружиной" || low.startsWith("соединить пружиной ") || low.startsWith("соединить пружиной\t") ->
+                runSpring(line)
+            low == "соединить шарниром" || low.startsWith("соединить шарниром ") || low.startsWith("соединить шарниром\t") ->
+                runHinge(line)
+            low == "ограничить угол шарнира" || low.startsWith("ограничить угол шарнира ") || low.startsWith("ограничить угол шарнира\t") ->
+                runLimit(line)
+            low == "задать мотор шарнира" || low.startsWith("задать мотор шарнира ") || low.startsWith("задать мотор шарнира\t") ->
+                runMotor(line)
+            low == "удалить соединение" || low.startsWith("удалить соединение ") || low.startsWith("удалить соединение\t") ->
+                runDelJoint(line)
+            low == "задать прочность соединения" || low.startsWith("задать прочность соединения ") || low.startsWith("задать прочность соединения\t") ->
+                runBreak(line)
             low == "идти" || low.startsWith("идти ") || low.startsWith("идти\t") ->
                 runIdti(line)
             low == "двигать" || low.startsWith("двигать ") || low.startsWith("двигать\t") ->
@@ -3061,11 +4549,19 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 runProdolzhit(line, "продолжить звук")
             low == "продолжить музыку" || low.startsWith("продолжить музыку ") || low.startsWith("продолжить музыку\t") ->
                 runProdolzhit(line, "продолжить музыку")
+            low == "прочитать базу" || low.startsWith("прочитать базу ") || low.startsWith("прочитать базу\t") ->
+                runProchitatBazu(line)
+            low == "создать в базе" || low.startsWith("создать в базе ") || low.startsWith("создать в базе\t") ->
+                runSozdatBazu(line)
+            low == "записать в базу" || low.startsWith("записать в базу ") || low.startsWith("записать в базу\t") ->
+                runZapisatBazu(line)
             low == "записать в файл" || low.startsWith("записать в файл ") || low.startsWith("записать в файл\t") ->
                 runZapisat(line, false)
             low == "добавить в файл" || low.startsWith("добавить в файл ") || low.startsWith("добавить в файл\t") ->
                 runZapisat(line, true)
-            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / создать окно / масштабирование окна / рисовать / показать / задать прозрачность / задать образ объекту / играть звук / остановить звук / задать громкость для звука / идти / написать / наверх / создать клон / вызвать / при нажатии)")
+            low == "запрос" || low.startsWith("запрос ") || low.startsWith("запрос\t") ->
+                runZapros(line)
+            else -> throw NcodeError("неизвестная команда (нужно: задать / изменить / присвоить / сделать / напечатать / печатать / вывести / ждать / спросить / если / повтори / вещать / создать окно / масштабирование окна / рисовать / показать / задать прозрачность / задать образ объекту / играть звук / остановить звук / задать громкость для звука / идти / написать / наверх / создать клон / вызвать / при нажатии / запрос / записать в базу / создать в базе / прочитать базу / удалить из базы)")
         }
     }
 
@@ -3099,7 +4595,6 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         val name = rest.substring(0, splitAt)
         val expr = rest.substring(splitAt).trim()
         if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
-        if (name.lowercase() in reserved) throw NcodeError("`$name` — служебное слово, возьми другое имя")
         if (expr.isEmpty()) throw NcodeError("нужно: $keyword <имя> <значение>")
         return name to evalExpression(expr)
     }
@@ -3115,6 +4610,49 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     fun evalExpression(expr: String): String {
+        val (shielded, urls) = shieldUrls(expr)
+        if (urls.isEmpty()) return evalExpressionRaw(expr)
+        try {
+            return unshieldUrls(evalExpressionRaw(shielded), urls)
+        } catch (e: NcodeError) {
+            throw NcodeError(unshieldUrls(e.message ?: "ошибка", urls))
+        }
+    }
+
+    private fun shieldUrls(expr: String): Pair<String, List<String>> {
+        val urls = mutableListOf<String>()
+        val out = StringBuilder()
+        var i = 0
+        var inQ = false
+        while (i < expr.length) {
+            val c = expr[i]
+            if (c == '"') {
+                inQ = !inQ
+                out.append(c)
+                i++
+                continue
+            }
+            if (!inQ && (expr.startsWith("http://", i, ignoreCase = true) || expr.startsWith("https://", i, ignoreCase = true))) {
+                var j = i
+                while (j < expr.length && !expr[j].isWhitespace() && expr[j] != '"') j++
+                urls.add(expr.substring(i, j))
+                out.append("\u0001URL" + (urls.size - 1) + "\u0001")
+                i = j
+                continue
+            }
+            out.append(c)
+            i++
+        }
+        return out.toString() to urls
+    }
+
+    private fun unshieldUrls(s: String, urls: List<String>): String {
+        var r = s
+        for (k in urls.indices) r = r.replace("\u0001URL" + k + "\u0001", urls[k])
+        return r
+    }
+
+    private fun evalExpressionRaw(expr: String): String {
         val e = normalizeSymbols(expr)
         splitByWordOp(e, "или")?.let { parts ->
             if (parts.any { it.trim().isEmpty() }) throw NcodeError("у `или` пусто слева или справа")
@@ -3161,14 +4699,20 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
 
     private fun evalComparison(expr: String): String {
         val low = expr.lowercase(java.util.Locale.ROOT)
-        val m = cmpRegex.find(low) ?: return evalAddSub(expr)
+        val all = cmpRegex.findAll(low).filter { m ->
+            isOutsideQuotes(expr, m.range.first + m.groupValues[1].length)
+        }.toList()
+        val m = all.firstOrNull() ?: return evalAddSub(expr)
         val leadLen = m.groupValues[1].length
         val left = expr.substring(0, m.range.first + leadLen)
         val right = expr.substring(m.range.last + 1)
         if (left.trim().isEmpty() || right.trim().isEmpty())
             throw NcodeError("у сравнения нужны левая и правая части")
-        if (cmpRegex.containsMatchIn(right.lowercase(java.util.Locale.ROOT)))
-            throw NcodeError("только одно сравнение в выражении")
+        val rightLow = right.lowercase(java.util.Locale.ROOT)
+        if (cmpRegex.findAll(rightLow).any { r ->
+            val absPos = m.range.last + 1 + r.range.first + r.groupValues[1].length
+            isOutsideQuotes(expr, absPos)
+        }) throw NcodeError("только одно сравнение в выражении")
         return compareValues(evalAddSub(left), evalAddSub(right), opOf(m.groupValues[2]))
     }
 
@@ -3238,7 +4782,6 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         if (rest.isEmpty()) throw NcodeError("нужно: спросить <подсказка> сохранить в <имя>")
         val (prompt, name) = splitAsk(rest)
         if (!nameRegex.matches(name)) throw NcodeError("плохое имя `$name` (буквы/цифры/_ без кавычек)")
-        if (name.lowercase() in reserved) throw NcodeError("`$name` — служебное слово, возьми другое имя")
         if (prompt.isNotEmpty()) {
             if (dryRun) evalConcat(prompt)
             else {
@@ -3348,6 +4891,17 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
                 needOperand = true
                 continue
             }
+            if (c == '/' && i + 1 < expr.length && expr[i + 1] == '/') {
+                out.append("//")
+                i += 2
+                continue
+            }
+            if (c == '/' && i > 0 && i + 1 < expr.length && expr[i - 1].isLetter() && expr[i + 1].isLetter()) {
+                out.append('/')
+                i++
+                needOperand = false
+                continue
+            }
             val one = when (c) {
                 '=' -> " равно "
                 '>' -> " больше "
@@ -3391,10 +4945,25 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
         return out.toString()
     }
 
+    private fun isOutsideQuotes(expr: String, pos: Int): Boolean {
+        var inQ = false
+        var i = 0
+        while (i < pos) {
+            if (expr[i] == '"') inQ = !inQ
+            i++
+        }
+        return !inQ
+    }
+
     private fun splitWithOps(expr: String, alts: String): Pair<List<String>, List<String>>? {
+        val t = expr.trim().lowercase(java.util.Locale.ROOT)
+        if (alts.split('|').any { it == t }) return null
         val low = expr.lowercase(java.util.Locale.ROOT)
         val rx = Regex("(^|[\\s\".])($alts)(?=$|[\\s\".])")
-        val matches = rx.findAll(low).toList()
+        val matches = rx.findAll(low).filter { m ->
+            val opPos = m.range.first + m.groupValues[1].length
+            isOutsideQuotes(expr, opPos)
+        }.toList()
         if (matches.isEmpty()) return null
         val parts = mutableListOf<String>()
         val ops = mutableListOf<String>()
@@ -3496,11 +5065,13 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
     }
 
     private fun splitByWordOp(expr: String, word: String): List<String>? {
+        if (expr.trim().lowercase(java.util.Locale.ROOT) == word) return null
         val rx = Regex("(^|[\\s\".])($word)(?=$|[\\s\".])")
         val low = expr.lowercase(java.util.Locale.ROOT)
         val guarded = cmp3Regex.findAll(low).map { it.range }.toList()
         val matches = rx.findAll(low).filter { m ->
-            guarded.none { g -> m.range.first <= g.last && g.first <= m.range.last }
+            guarded.none { g -> m.range.first <= g.last && g.first <= m.range.last } &&
+            isOutsideQuotes(expr, m.range.first + m.groupValues[1].length)
         }.toList()
         if (matches.isEmpty()) return null
         val out = mutableListOf<String>()
@@ -3594,7 +5165,8 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             prop == "синий" || prop == "синего" ||
             prop == "видимость" || prop == "видимости" || prop == "текст" || prop == "текста" ||
             prop == "перо" || prop == "пера" || prop == "слой" || prop == "слоя" ||
-            prop == "форма" || prop == "формы" || prop == "скорость" || prop == "скорости"
+            prop == "форма" || prop == "формы" || prop == "скорость" || prop == "скорости" ||
+            prop == "тип" || prop == "типа"
     }
 
     private fun svoProp(name: String, prop: String): String {
@@ -3605,6 +5177,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             "текст", "текста" -> ""
             "скорость", "скорости" -> "0"
             "форма", "формы" -> "квадрат"
+            "тип", "типа" -> "динамичный"
             else -> "100"
         }
         val o = synchronized(gfxLock) {
@@ -3628,6 +5201,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             "видимость", "видимости" -> if (o.visible) "истина" else "ложь"
             "скорость", "скорости" -> fmtNum(o.vel)
             "форма", "формы" -> if (o.circle) "круг" else "квадрат"
+            "тип", "типа" -> if (o.bodyType == 1) "статичный" else "динамичный"
             "текст", "текста" -> o.text ?: ""
             "перо", "пера" -> if (o.penDown) "истина" else "ложь"
             else -> synchronized(gfxLock) { gfxObjs.indexOfFirst { it.name == name }.toString() }
@@ -3735,7 +5309,7 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             }
             return fmtNum(best.toDouble())
         }
-        if (head0 == "нажата" && (toks.size == 2 || (toks.size == 3 && (toks[1].lowercase(java.util.Locale.ROOT) == "клавиша" || (toks[1].lowercase(java.util.Locale.ROOT) == "кнопка" && (toks[2].lowercase(java.util.Locale.ROOT) == "мыши" || toks[2].lowercase(java.util.Locale.ROOT) == "мышь")))))) {
+        if (head0 == "нажата" && (toks.size == 2 || (toks.size == 3 && (toks[1].lowercase(java.util.Locale.ROOT) == "клавиша" || toks[1].lowercase(java.util.Locale.ROOT) == "стрелка" || (toks[1].lowercase(java.util.Locale.ROOT) == "кнопка" && (toks[2].lowercase(java.util.Locale.ROOT) == "мыши" || toks[2].lowercase(java.util.Locale.ROOT) == "мышь")))))) {
             if (toks.size == 2 && (toks[1].lowercase(java.util.Locale.ROOT) == "мышь" || toks[1].lowercase(java.util.Locale.ROOT) == "кнопка")) {
                 if (dryRun) return "ложь"
                 return if (synchronized(mouseQueue) { mouseDown }) "истина" else "ложь"
@@ -3748,6 +5322,12 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             if (dryRun) return "ложь"
             val down = synchronized(keyQueue) { normKey(key) in heldKeys }
             return if (down) "истина" else "ложь"
+        }
+        if ((head0 == "отпущена" || head0 == "отпущен" || head0 == "отпущено") && (toks.size == 2 || (toks.size == 3 && toks[1].lowercase(java.util.Locale.ROOT) == "клавиша"))) {
+            val key = if (toks.size == 2) toks[1] else toks[2]
+            if (dryRun) return "ложь"
+            val down = synchronized(keyQueue) { normKey(key) in heldKeys }
+            return if (!down) "истина" else "ложь"
         }
         if (head0 == "касается" && toks.size == 3) {
             if (dryRun) return "ложь"
@@ -3764,7 +5344,89 @@ class NcodeInterpreter(val platform: NcodePlatform) : NcodeInputSink {
             val b = toks[2].lowercase(java.util.Locale.ROOT)
             return fmtNum(distObjs(a, b))
         }
+        if (head0 == "гравитация" && toks.size == 2 && (toks[1].lowercase(java.util.Locale.ROOT) == "x" || toks[1].lowercase(java.util.Locale.ROOT) == "y")) {
+            return fmtNum(if (toks[1].lowercase(java.util.Locale.ROOT) == "x") gravX else gravY)
+        }
+        if (head0 == "масса" && toks.size == 3 && toks[1].lowercase(java.util.Locale.ROOT) == "объекта") {
+            val name = toks[2].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "1"
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+            return fmtNum(o.mass)
+        }
+        if (head0 == "скорость" && toks.size == 4 && toks[1].lowercase(java.util.Locale.ROOT) == "x" && toks[2].lowercase(java.util.Locale.ROOT) == "объекта") {
+            val name = toks[3].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "0"
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+            return fmtNum(o.vx)
+        }
+        if (head0 == "скорость" && toks.size == 4 && toks[1].lowercase(java.util.Locale.ROOT) == "y" && toks[2].lowercase(java.util.Locale.ROOT) == "объекта") {
+            val name = toks[3].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "0"
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+            return fmtNum(o.vy)
+        }
+        if ((head0 == "общая" && toks.size == 4 && toks[1].lowercase(java.util.Locale.ROOT) == "скорость" && toks[2].lowercase(java.util.Locale.ROOT) == "объекта") || (head0 == "скорость" && toks.size == 3 && toks[1].lowercase(java.util.Locale.ROOT) == "объекта")) {
+            val name = if (head0 == "общая") toks[3].lowercase(java.util.Locale.ROOT) else toks[2].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "0"
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+            return fmtNum(Math.hypot(o.vx, o.vy))
+        }
+        if (head0 == "угловая" && toks.size == 4 && toks[1].lowercase(java.util.Locale.ROOT) == "скорость" && toks[2].lowercase(java.util.Locale.ROOT) == "объекта") {
+            val name = toks[3].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "0"
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+            return fmtNum(o.av)
+        }
+        if (head0 == "объект" && toks.size == 4 && toks[2].lowercase(java.util.Locale.ROOT) == "является" && toks[3].lowercase(java.util.Locale.ROOT) == "триггером") {
+            val name = toks[1].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "ложь"
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+            return if (o.isTrigger) "истина" else "ложь"
+        }
+        if (head0 == "объект" && toks.size == 4 && toks[2].lowercase(java.util.Locale.ROOT) == "на" && toks[3].lowercase(java.util.Locale.ROOT) == "земле") {
+            val name = toks[1].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "ложь"
+            return if (touchesEdge(name) || isOnGround(name)) "истина" else "ложь"
+        }
+        if (head0 == "сила" && toks.size == 6 && toks[1].lowercase(java.util.Locale.ROOT) == "последнего" && toks[2].lowercase(java.util.Locale.ROOT) == "удара" && toks[3].lowercase(java.util.Locale.ROOT) == "объекта") {
+            val name = toks[5].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "0"
+            val o = synchronized(gfxLock) { gfxObjs.find { it.name == name }?.copy() } ?: throw NcodeError("объект не нарисован")
+            return fmtNum(o.lastHit)
+        }
+        if (head0 == "точка" && toks.size == 3 && toks[1].lowercase(java.util.Locale.ROOT) == "столкновения" && (toks[2].lowercase(java.util.Locale.ROOT) == "x" || toks[2].lowercase(java.util.Locale.ROOT) == "y")) {
+            return fmtNum(if (toks[2].lowercase(java.util.Locale.ROOT) == "x") lastCollX else lastCollY)
+        }
+        if (head0 == "бросить" && toks.size == 10 && toks[1].lowercase(java.util.Locale.ROOT) == "луч" && toks[2].lowercase(java.util.Locale.ROOT) == "от" && toks[5].lowercase(java.util.Locale.ROOT) == "до" && toks[8].lowercase(java.util.Locale.ROOT) == "пересекает") {
+            val x1 = evalArithOperand(toks[3])
+            val y1 = evalArithOperand(toks[4])
+            val x2 = evalArithOperand(toks[6])
+            val y2 = evalArithOperand(toks[7])
+            val name = toks[9].lowercase(java.util.Locale.ROOT)
+            if (dryRun) return "ложь"
+            val b = objBox(name) ?: throw NcodeError("объект не нарисован")
+            val hit = segmentsIntersect(x1, y1, x2, y2, b[0], b[2], b[1], b[2]) || segmentsIntersect(x1, y1, x2, y2, b[1], b[2], b[1], b[3]) || segmentsIntersect(x1, y1, x2, y2, b[1], b[3], b[0], b[3]) || segmentsIntersect(x1, y1, x2, y2, b[0], b[3], b[0], b[2])
+            return if (hit) "истина" else "ложь"
+        }
+        if (head0 == "дистанция" && toks.size == 10 && toks[1].lowercase(java.util.Locale.ROOT) == "луча" && toks[2].lowercase(java.util.Locale.ROOT) == "до" && toks[4].lowercase(java.util.Locale.ROOT) == "от" && toks[7].lowercase(java.util.Locale.ROOT) == "в" && toks[8].lowercase(java.util.Locale.ROOT) == "направлении") {
+            val name = toks[3].lowercase(java.util.Locale.ROOT)
+            val x = evalArithOperand(toks[5])
+            val y = evalArithOperand(toks[6])
+            val ang = evalArithOperand(toks[9])
+            if (dryRun) return "0"
+            val b = objBox(name) ?: throw NcodeError("объект не нарисован")
+            val cx = (b[0] + b[1]) / 2
+            val cy = (b[2] + b[3]) / 2
+            return fmtNum(Math.hypot(cx - x, cy - y))
+        }
+        if (head0 == "код" && toks.size == 2 && toks[1].lowercase(java.util.Locale.ROOT) == "ответа") {
+            if (dryRun) return "200"
+            return lastHttpCode.toString()
+        }
         if (head0 == "свойство") {
+            if (toks.size == 5 && toks[1].lowercase(java.util.Locale.ROOT) == "тип" && toks[2].lowercase(java.util.Locale.ROOT) == "движения" && (toks[3].lowercase(java.util.Locale.ROOT) == "объекта" || toks[3].lowercase(java.util.Locale.ROOT) == "обьекта")) {
+                return svoProp(toks[4].lowercase(java.util.Locale.ROOT), "тип")
+            }
             if (toks.size == 4 && (toks[2].lowercase(java.util.Locale.ROOT) == "объекта" || toks[2].lowercase(java.util.Locale.ROOT) == "обьекта")) {
                 val prop = toks[1].lowercase(java.util.Locale.ROOT).replace("ё", "е")
                 if (!svoKnown(prop)) throw NcodeError("не знаю свойство `$prop`")
